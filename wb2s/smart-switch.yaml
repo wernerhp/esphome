@@ -1,0 +1,71 @@
+substitutions:
+  name: "smart-switch"
+  friendly_name: "Smart Switch"
+  comment: "A WB2S-based Wi-Fi Smart Switch"
+  project_name: "wernerhp.esphome"
+  project_version: "0.0.1"
+  package_importurl: github://wernerhp/esphome/wb2s/smart-switch.yaml@main
+  ap_password: !secret fallback_password
+  name_add_mac_suffix: false
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+
+bk72xx:
+  board: wb2s
+  framework:
+    version: dev
+
+# Enable logging
+logger:
+
+# Enable Home Assistant API
+api:
+
+ota:
+
+dashboard_import:
+  package_import_url: ${package_import_url}
+  import_full_config: false
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+  # Enable fallback hotspot in case wifi connection fails
+  ap:
+    ssid: ${friendly_name}
+    password: ${ap_password}
+
+web_server:
+  port: 88
+
+switch:
+  - platform: gpio
+    pin:
+      number: GPIO6
+      inverted: false
+    name: "Relay 1"
+    id: relay_1
+
+binary_sensor:
+  - platform: gpio
+    pin:
+      number: GPIO7 # GPIO8
+      inverted: true
+      mode:
+        input: true
+        pullup: false
+    name: "Button 1"
+    disabled_by_default: true
+    on_click:
+      min_length: 50ms
+      max_length: 350ms
+      then:
+        - switch.toggle: relay_1
+
+status_led:
+  pin: 
+    number: GPIO10
+    inverted: true
