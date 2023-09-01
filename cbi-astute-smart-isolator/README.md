@@ -1,0 +1,1 @@
+![img.png](../cbi-astute-smart-isolator/img.png)

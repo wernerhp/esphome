@@ -1,0 +1,269 @@
+substitutions:
+  name: "centurion-d5-evo"
+  friendly_name: "Centurion D5 Evo"
+  comment: "Control your Centurion D5 Evo gate motor remotely."
+  project_name: "wernerhp.esphome_centurion_d5_evo"
+  project_version: "1.0.0"
+
+  relay_1_pin: GPIO32
+  relay_2_pin: GPIO33
+  relay_3_pin: GPIO25
+  relay_4_pin: GPIO26
+  led_pin: GPIO23
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+  comment: ${comment}
+  name_add_mac_suffix: true
+  
+  project:
+    name: ${project_name}
+    version: ${project_version}
+
+esp32:
+  board: esp32dev
+  framework:
+    type: arduino
+
+# Enable logging
+logger:
+  level: INFO
+
+# Enable Home Assistant API
+api:
+
+ota:
+
+dashboard_import:
+  package_import_url: github://wernerhp/esphome.centurion_d5_evo/centurion-d5-evo.yaml@main
+  import_full_config: false
+
+wifi:
+  power_save_mode: NONE
+
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+  
+improv_serial:
+
+captive_portal:
+
+
+binary_sensor:
+  - platform: gpio
+    pin: ${led_pin}
+    id: status_led
+    name: "Status LED"
+    entity_category: diagnostic
+    icon: mdi:led-outline
+    disabled_by_default: true
+    publish_initial_state: true
+    filters:
+        delayed_on_off: 100ms
+    on_multi_click:
+      - timing: # Closed
+          - OFF for at least 2000ms
+        then:
+          - logger.log: "Closed"
+          - text_sensor.template.publish:
+              id: status
+              state: "Closed"
+          - lambda: |-
+              id(gate).current_operation = CoverOperation::COVER_OPERATION_IDLE;
+              id(gate).publish_state();
+        invalid_cooldown: 100ms
+
+      - timing: # Open
+          - ON for at least 2000ms
+        then:
+          - logger.log: "Open"
+          - text_sensor.template.publish:
+              id: status
+              state: "Open"
+          - lambda: |-
+              id(gate).current_operation = CoverOperation::COVER_OPERATION_IDLE;
+              id(gate).publish_state();
+        invalid_cooldown: 100ms
+
+      - timing: # Closing
+        - ON for 100ms to 200ms
+        - OFF for 100ms to 200ms
+        - ON for 100ms to 200ms
+        - OFF for 100ms to 200ms
+        - ON for 100ms to 200ms
+        - OFF for 100ms to 200ms
+        - ON for 100ms to 200ms
+        - OFF for 100ms to 200ms
+        - ON for 100ms to 200ms
+        - OFF for 100ms to 200ms
+        - ON for 100ms to 200ms
+        - OFF for 100ms to 200ms
+        - ON for 100ms to 200ms
+        - OFF for 100ms to 200ms
+        - ON for 100ms to 200ms
+        - OFF for 100ms to 200ms
+        then:
+          - logger.log: "Closing"
+          - text_sensor.template.publish:
+              id: status
+              state: "Closing"
+          - lambda: |-
+              id(gate).current_operation = CoverOperation::COVER_OPERATION_CLOSING;
+              id(gate).publish_state();
+        invalid_cooldown: 100ms
+
+      - timing: # Opening
+          - ON for 200ms to 400ms
+          - OFF for 200ms to 400ms
+          - ON for 200ms to 400ms
+          - OFF for 200ms to 400ms
+          - ON for 200ms to 400ms
+          - OFF for 200ms to 400ms
+          - ON for 200ms to 400ms
+          - OFF for 200ms to 400ms
+        then:
+          - logger.log: "Opening"
+          - text_sensor.template.publish:
+              id: status
+              state: "Opening"
+          - lambda: |-
+              id(gate).current_operation = CoverOperation::COVER_OPERATION_OPENING;
+              id(gate).publish_state();
+        invalid_cooldown: 100ms
+
+      - timing: # Pillar light override
+          - ON for 200ms to 300ms
+          - OFF for 1700ms to 1800ms
+        then:
+          - logger.log: "Pillar light override"
+          - text_sensor.template.publish:
+              id: status
+              state: "Pillar light override"
+        invalid_cooldown: 100ms
+
+      - timing: # No Mains
+          - ON for 200ms to 300ms
+          - OFF for 200ms to 300ms
+          - ON for 200ms to 300ms
+          - OFF for 1200ms to 1400ms
+        then:
+          - logger.log: "No Mains"
+          - text_sensor.template.publish:
+              id: status
+              state: "No Mains"
+        invalid_cooldown: 100ms
+
+      - timing: # Battery Low
+          - ON for 200ms to 300ms
+          - OFF for 200ms to 300ms
+          - ON for 200ms to 300ms
+          - OFF for 200ms to 300ms
+          - ON for 200ms to 300ms
+          - OFF for 500ms to 1000ms
+        then:
+          - logger.log: "Low Battery"
+          - text_sensor.template.publish:
+              id: status
+              state: "Low Battery"
+        invalid_cooldown: 100ms
+
+
+output:
+  - platform: gpio
+    pin: ${relay_1_pin}
+    id: relay_1
+  - platform: gpio
+    pin: ${relay_2_pin}
+    id: relay_2
+  - platform: gpio
+    pin: ${relay_3_pin}
+    id: relay_3
+
+button:
+  - platform: output
+    output: relay_1
+    id: button_1
+    disabled_by_default: true
+    duration: 1000ms
+    name: "Open / Auto Close"
+    icon: "mdi:gate"
+  - platform: output
+    output: relay_2
+    id: button_2
+    disabled_by_default: true
+    duration: 3000ms # Autoclose override time
+    name: "Open / Manual Close"
+    icon: "mdi:gate"
+  - platform: output
+    output: relay_3
+    id: button_3
+    duration: 1000ms
+    name: "Pedestrian"
+    icon: "mdi:walk"
+
+switch:
+  - platform: gpio
+    pin:
+      number: ${relay_4_pin}
+    id: relay_4
+    icon: "mdi:lock"
+    name: "Lock"
+
+cover:
+  - platform: template
+    name: "Gate"
+    device_class: gate
+    id: gate
+    lambda: |-
+      if (id(status).state == "Open") {
+        return COVER_OPEN;
+      } else if (id(status).state == "Closed") {
+        return COVER_CLOSED;
+      } else {
+        return {};
+      }
+    open_action:
+      - button.press: button_1
+    close_action:
+      - button.press: button_1
+    stop_action:
+      - button.press: button_1
+    optimistic: false
+
+# # Sensors for ESP version and WIFI information
+text_sensor:
+  - platform: template
+    icon: mdi:information-outline
+    id: status
+    name: "Status"
+  # Installed version
+  - platform: template
+    name: "Device Version"
+    id: device_version
+    icon: "mdi:label-outline"
+    entity_category: diagnostic
+    lambda: |-
+      return {"${project_version}"};
+    update_interval: 6h
+  # ESPHome version
+  - platform: version
+    hide_timestamp: true
+    name: 'ESPHome Version'
+  # IP address and connected SSID
+  - platform: wifi_info
+    ip_address:
+      name: 'IP Address'
+      icon: mdi:wifi
+    ssid:
+      name: 'SSID'
+      icon: mdi:wifi-strength-2
+
+sensor:
+  # Uptime
+  - platform: uptime
+    name: Uptime Sensor
+  # WiFi signal
+  - platform: wifi_signal
+    name: "WiFi Signal"
+    update_interval: 120s

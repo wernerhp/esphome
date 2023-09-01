@@ -1,0 +1,190 @@
+substitutions:
+  name: "garage-door"
+  mac_suffix: "true"
+  friendly_name: "Garage Door"
+  comment: "Control your garage door remotely."
+  project_name: "wernerhp.esphome_garage"
+  project_version: "1.0.0"
+
+  relay_1_pin: GPIO19
+  open_pin: GPIO6
+  closed_pin: GPIO10
+  status_led_pin: GPIO2
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+  comment: ${comment}
+  name_add_mac_suffix: ${mac_suffix}
+  
+  project:
+    name: ${project_name}
+    version: ${project_version}
+
+esp32:
+  board: esp32-c3-devkitm-1
+  framework:
+    type: arduino
+
+# Enable logging
+logger:
+  level: INFO
+
+# Enable Home Assistant API
+api:
+
+ota:
+
+# dashboard_import:
+#   package_import_url: github://wernerhp/esphome/esp32/garage_door.yaml@main
+#   import_full_config: false
+
+wifi:
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+    ssid: ${name}
+    password: "12345678" # default password
+
+captive_portal:
+
+
+binary_sensor:
+  - platform: gpio
+    pin: 
+      number: ${open_pin}
+      mode:
+        input: true
+        pullup: true
+    id: cover_open
+    internal: true
+    name: "Cover Open"
+    filters:
+      delayed_on_off: 500ms
+    on_state:
+      lambda: |-
+        if (id(cover_open).state && !id(cover_closed).state) {
+          id(garage_door).position = cover::COVER_OPEN;
+          id(garage_door).current_operation = CoverOperation::COVER_OPERATION_IDLE;
+          id(garage_door).publish_state();
+          id(status).publish_state("Open");
+        } else if (!id(cover_open).state && !id(cover_closed).state) {
+          if (id(garage_door).position == cover::COVER_OPEN) {
+            id(garage_door).current_operation = CoverOperation::COVER_OPERATION_CLOSING;
+            id(garage_door).publish_state();
+            id(status).publish_state("Closing");
+          } else if (id(garage_door).position == cover::COVER_CLOSED) {
+            id(garage_door).current_operation = CoverOperation::COVER_OPERATION_OPENING;
+            id(garage_door).publish_state();
+            id(status).publish_state("Opening");
+          }
+        } else if (!id(cover_open).state && id(cover_closed).state) {
+          id(garage_door).position = cover::COVER_CLOSED;
+          id(garage_door).current_operation = CoverOperation::COVER_OPERATION_IDLE;
+          id(garage_door).publish_state();
+          id(status).publish_state("Closed");
+        }
+
+  - platform: gpio
+    pin: 
+      number: ${closed_pin}
+      mode:
+        input: true
+        pullup: true
+    id: cover_closed
+    internal: true
+    name: "Cover Closed"
+    filters:
+      delayed_on_off: 500ms
+    on_state:
+      lambda: |-
+        if (id(cover_open).state && !id(cover_closed).state) {
+          id(garage_door).position = cover::COVER_OPEN;
+          id(garage_door).current_operation = CoverOperation::COVER_OPERATION_IDLE;
+          id(garage_door).publish_state();
+          id(status).publish_state("Open");
+        } else if (!id(cover_open).state && !id(cover_closed).state) {
+          if (id(garage_door).position == cover::COVER_OPEN) {
+            id(garage_door).current_operation = CoverOperation::COVER_OPERATION_CLOSING;
+            id(garage_door).publish_state();
+            id(status).publish_state("Closing");
+          } else if (id(garage_door).position == cover::COVER_CLOSED) {
+            id(garage_door).current_operation = CoverOperation::COVER_OPERATION_OPENING;
+            id(garage_door).publish_state();
+            id(status).publish_state("Opening");
+          }
+        } else if (!id(cover_open).state && id(cover_closed).state) {
+          id(garage_door).position = cover::COVER_CLOSED;
+          id(garage_door).current_operation = CoverOperation::COVER_OPERATION_IDLE;
+          id(garage_door).publish_state();
+          id(status).publish_state("Closed");
+        }
+
+output:
+  - platform: gpio
+    pin: 
+      number: ${relay_1_pin}
+      inverted: true
+    id: relay_1
+
+button:
+  - platform: output
+    output: relay_1
+    id: button_1
+    disabled_by_default: true
+    duration: 1000ms
+    name: "Button 1"
+    icon: "mdi:gesture-tap-button"
+
+cover:
+  - platform: template
+    name: "Garage Door"
+    device_class: garage
+    id: garage_door
+    open_action:
+      - button.press: button_1
+    close_action:
+      - button.press: button_1
+    stop_action:
+      - button.press: button_1
+    optimistic: false
+
+# # Sensors for ESP version and WIFI information
+text_sensor:
+  - platform: template
+    icon: mdi:information-outline
+    id: status
+    name: "Status"
+    disabled_by_default: true
+  # Installed version
+  - platform: template
+    name: "Device Version"
+    id: device_version
+    icon: "mdi:label-outline"
+    entity_category: diagnostic
+    lambda: |-
+      return {"${project_version}"};
+    update_interval: 6h
+  # ESPHome version
+  - platform: version
+    hide_timestamp: true
+    name: 'ESPHome Version'
+  # IP address and connected SSID
+  - platform: wifi_info
+    ip_address:
+      name: 'IP Address'
+      icon: mdi:wifi
+    ssid:
+      name: 'SSID'
+      icon: mdi:wifi-strength-2
+
+sensor:
+  # Uptime
+  - platform: uptime
+    name: Uptime Sensor
+  # WiFi signal
+  - platform: wifi_signal
+    name: "WiFi Signal"
+    update_interval: 120s
+
+status_led:
+  pin: ${status_led_pin}

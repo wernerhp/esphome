@@ -4,7 +4,7 @@ substitutions:
   comment: "A WB2S-based Wi-Fi Smart Switch"
   project_name: "wernerhp.esphome"
   project_version: "0.0.1"
-  package_importurl: github://wernerhp/esphome/wb2s/smart-switch.yaml@main
+  package_importurl: github://wernerhp/esphome/bk72xx/smart-switch.yaml@main
   ap_password: !secret fallback_password
   name_add_mac_suffix: false
 

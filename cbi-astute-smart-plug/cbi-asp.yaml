@@ -1,0 +1,158 @@
+substitutions:
+  name: "cbi-asp"
+  friendly_name: "Astute Smart Plug"
+  comment: "The Astute Smart Plug is an energy monitoring, scheduling and control switch with load management and automation capability."
+  project_name: "wernerhp.esphome/astute-smart-plug"
+  project_version: "1.0.0"
+
+  button_1_pin: PA22
+  relay_1_pin: PA12
+  led_i_blue_pin: PA05
+  led_i_red_pin: PA23
+  sel_i_pin: PA19
+  cf_pin: PA15
+  cf1_pin: PA14
+  voltage_divider: "1742"
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+  comment: ${comment}
+  # name_add_mac_suffix: true
+
+  project:
+    name: ${project_name}
+    version: ${project_version}
+
+rtl87xx:
+  board: wr3e
+  framework:
+    version: dev
+
+# Enable logging
+logger:
+
+# Enable Home Assistant API
+api:
+
+ota:
+
+wifi:
+  ap:
+
+web_server:
+  port: 80
+
+binary_sensor:
+  - platform: gpio
+    pin: ${button_1_pin}
+    name: "Power Button"
+    filters:
+      - delayed_on: 10ms
+      - delayed_off: 10ms
+    on_press:
+      - switch.toggle: relay_1
+    internal: true
+
+switch:
+  - platform: gpio
+    pin: ${relay_1_pin}
+    name: "Relay"
+    id: relay_1
+    on_turn_on:
+      - light.turn_on: light_1
+    on_turn_off:
+      - light.turn_off: light_1
+
+light:
+  - platform: binary
+    id: light_1
+    output: led_1
+
+output:
+  - platform: gpio
+    pin: ${led_i_red_pin}
+    inverted: true
+    id: led_1
+
+status_led:
+    pin:
+      number: ${led_i_blue_pin}
+      inverted: true
+
+button:
+  - platform: restart
+    name: "Restart"
+
+sensor:
+  - platform: hlw8012
+    model: BL0937
+    sel_pin:
+      number: ${sel_i_pin}
+      inverted: true
+    cf_pin:
+      number: ${cf_pin}
+      inverted: true
+    cf1_pin:
+      number: ${cf1_pin}
+      inverted: true
+    voltage_divider: ${voltage_divider}
+    change_mode_every: 3
+    update_interval: 3s
+    # Current sensor
+    current:
+      name: "Current"
+      unit_of_measurement: A
+      accuracy_decimals: 3
+#      filters:
+#        # Map from sensor -> measured value
+#        - calibrate_linear:
+#            - 0.0 -> 0.013
+#            - 0.08208 -> 0.071
+#            - 1.34223 -> 1.066
+#            - 5.57170 -> 4.408
+#            - 6.69184 -> 5.259
+#            - 6.97187 -> 5.540
+#      # Make everything below 0.01A appear as just 0A.
+#      # Furthermore it corrects 0.013A for the power usage of the plug.
+#      - lambda: if (x < (0.01 - 0.013)) return 0; else return (x - 0.013)
+    # Voltage sensor
+    voltage:
+      name: "Voltage"
+      unit_of_measurement: V
+      accuracy_decimals: 1
+#      filters:
+#        # Map from sensor -> measured value
+#        - calibrate_linear:
+#            - 0.0 -> 0.0
+#            - 602.87506 -> 229.9
+#            - 609.8 -> 232.8
+    # Power sensor
+    power:
+      id: power
+      name: "Power"
+      unit_of_measurement: W
+      accuracy_decimals: 0
+    energy:
+      name: "Energy"
+
+  - platform: uptime
+    name: "Uptime"
+
+  - platform: wifi_signal
+    name: "WiFi Signal"
+
+text_sensor:
+  - platform: version
+    name: "ESPHome Version"
+
+  - platform: wifi_info
+    ip_address:
+      name: 'IP Address'
+      icon: mdi:wifi
+    ssid:
+      name: 'SSID'
+      icon: mdi:wifi-strength-2
+    bssid:
+      name: 'BSSID'
+      icon: mdi:wifi-strength-2
