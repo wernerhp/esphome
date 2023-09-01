@@ -1,1 +1,5 @@
-![img.png](../cbi-astute-smart-controller/img.png)
+# CBI Astute Smart Controller
+
+https://docs.libretiny.eu/boards/wr3e/
+
+<img src="img.png" width="50%" height="50%">
