@@ -11,6 +11,9 @@ substitutions:
   rx_pin: P10
   tx_pin: P11
 
+dashboard_import:
+  package_import_url: github://wernerhp/esphome/bneta-smart-plug/bneta.yaml@main
+  
 esphome:
   name: ${name}
   friendly_name: ${friendly_name}
@@ -33,11 +36,6 @@ logger:
 api:
 
 ota:
-
-# This should point to the public location of this yaml file.
-dashboard_import:
-  package_import_url: github://wernerhp/esphome/bneta-smart-plug/bneta.yaml@latest
-  import_full_config: false # or true
 
 wifi:
   # Enable fallback hotspot in case wifi connection fails
