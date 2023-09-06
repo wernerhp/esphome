@@ -3,7 +3,7 @@ substitutions:
   friendly_name: "BNETA Smart Plug"
   comment: "The BNETA Smart Plug is an energy monitoring, scheduling and control plug with load management and automation capability."
   project_name: "wernerhp.esphome/bneta-smart-plug"
-  project_version: "1.0.0"
+  project_version: "0.1.0"
 
   button_1_pin: P24
   relay_1_pin: P26
