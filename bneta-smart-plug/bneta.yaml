@@ -103,6 +103,14 @@ sensor:
     name: "WiFi Signal"
 
 text_sensor:
+  - platform: template
+    name: "Firmware version"
+    icon: "mdi:label-outline"
+    entity_category: diagnostic
+    lambda: |-
+      return {"${project_version}"};
+    update_interval: 6h
+    
   - platform: version
     name: "ESPHome Version"
 
