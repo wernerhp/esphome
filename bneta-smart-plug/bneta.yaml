@@ -115,6 +115,9 @@ text_sensor:
     name: "ESPHome Version"
 
   - platform: wifi_info
+    mac_address:
+      name: 'Mac Address'
+      icon: mdi:wifi
     ip_address:
       name: 'IP Address'
       icon: mdi:wifi
