@@ -1,0 +1,120 @@
+substitutions:
+  name: "bneta"
+  friendly_name: "BNETA Smart Plug"
+  comment: "The BNETA Smart Plug is an energy monitoring, scheduling and control plug with load management and automation capability."
+  project_name: "wernerhp.esphome/bneta-smart-plug"
+  project_version: "1.0.0"
+
+  button_1_pin: P24
+  relay_1_pin: P26
+  led_pin: P8
+  rx_pin: P10
+  tx_pin: P11
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+  name_add_mac_suffix: true
+
+  project:
+    name: ${project_name}
+    version: ${project_version}
+
+bk72xx:
+  board: cb2s
+  framework:
+    version: latest
+
+# Enable logging
+logger:
+  level: INFO
+
+# Enable Home Assistant API
+api:
+
+ota:
+
+# This should point to the public location of this yaml file.
+dashboard_import:
+  package_import_url: github://wernerhp/esphome/bneta-smart-plug/bneta.yaml@latest
+  import_full_config: false # or true
+
+wifi:
+  # Enable fallback hotspot in case wifi connection fails
+  ap:
+    password: "2QVtsMyh6gec"
+
+captive_portal:
+
+
+web_server:
+  port: 80
+
+output:
+  - platform: gpio
+    pin: ${relay_1_pin}
+    id: relay_1
+
+switch:
+  - platform: output
+    id: switch_1
+    output: relay_1
+    name: "Relay"
+
+binary_sensor:
+  - platform: gpio
+    pin: ${button_1_pin}
+    name: "Button"
+    filters:
+      - delayed_on: 10ms
+      - delayed_off: 10ms
+    on_press:
+      - switch.toggle: switch_1
+    internal: true
+
+button:
+  - platform: restart
+    name: "Restart"
+
+status_led:
+    pin:
+      number: ${led_pin}
+      inverted: true
+
+uart:
+  id: uart_bus
+  tx_pin: ${tx_pin}
+  rx_pin: ${rx_pin}
+  baud_rate: 4800
+  stop_bits: 1
+  debug:
+    direction: BOTH
+    dummy_receiver: true
+    after:
+      delimiter: "\n"
+    sequence:
+      - lambda: |-
+          UARTDebug::log_hex(direction, bytes, ':');
+          UARTDebug::log_string(direction, bytes);
+  
+sensor:
+  - platform: uptime
+    name: "Uptime"
+
+  - platform: wifi_signal
+    name: "WiFi Signal"
+
+text_sensor:
+  - platform: version
+    name: "ESPHome Version"
+
+  - platform: wifi_info
+    ip_address:
+      name: 'IP Address'
+      icon: mdi:wifi
+    ssid:
+      name: 'SSID'
+      icon: mdi:wifi-strength-2
+    bssid:
+      name: 'BSSID'
+      icon: mdi:wifi-strength-2
