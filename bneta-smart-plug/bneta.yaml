@@ -2,7 +2,7 @@ substitutions:
   name: "bneta"
   friendly_name: "BNETA Smart Plug"
   comment: "The BNETA Smart Plug is an energy monitoring, scheduling and control plug with load management and automation capability."
-  project_name: "wernerhp.esphome/bneta-smart-plug"
+  project_name: "wernerhp.bneta"
   project_version: "0.1.0"
 
   button_1_pin: P24
@@ -13,6 +13,7 @@ substitutions:
 
 dashboard_import:
   package_import_url: github://wernerhp/esphome/bneta-smart-plug/bneta.yaml@main
+  import_full_config: true
   
 esphome:
   name: ${name}
@@ -40,7 +41,7 @@ ota:
 wifi:
   # Enable fallback hotspot in case wifi connection fails
   ap:
-    password: "2QVtsMyh6gec"
+    password: "12345678"
 
 captive_portal:
 
