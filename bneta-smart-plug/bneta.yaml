@@ -1,3 +1,6 @@
+# LibreTiny ESPHome v 2.7.0-dev
+# LibreTiny 1.1.0
+
 substitutions:
   name: "bneta"
   friendly_name: "BNETA Smart Plug"
@@ -14,7 +17,7 @@ substitutions:
 dashboard_import:
   package_import_url: github://wernerhp/esphome/bneta-smart-plug/bneta.yaml@main
   import_full_config: true
-  
+
 esphome:
   name: ${name}
   friendly_name: ${friendly_name}
@@ -24,10 +27,10 @@ esphome:
     name: ${project_name}
     version: ${project_version}
 
-bk72xx:
+libretiny:
   board: cb2s
   framework:
-    version: latest
+    version: 1.1.0
 
 # Enable logging
 logger:
@@ -44,7 +47,6 @@ wifi:
     password: "12345678"
 
 captive_portal:
-
 
 web_server:
   port: 80
@@ -76,9 +78,9 @@ button:
     name: "Restart"
 
 status_led:
-    pin:
-      number: ${led_pin}
-      inverted: true
+  pin:
+    number: ${led_pin}
+    inverted: true
 
 uart:
   id: uart_bus
@@ -86,17 +88,25 @@ uart:
   rx_pin: ${rx_pin}
   baud_rate: 4800
   stop_bits: 1
-  debug:
-    direction: BOTH
-    dummy_receiver: true
-    after:
-      delimiter: "\n"
-    sequence:
-      - lambda: |-
-          UARTDebug::log_hex(direction, bytes, ':');
-          UARTDebug::log_string(direction, bytes);
-  
+
 sensor:
+  - platform: bl0942
+    uart_id: uart_bus
+    voltage:
+      name: "Voltage"
+    current:
+      name: "Current"
+    power:
+      name: "Power"
+      filters:
+        multiply: -1
+    energy:
+      name: "Energy"
+    frequency:
+      name: "Frequency"
+      accuracy_decimals: 2
+    update_interval: 1s
+
   - platform: uptime
     name: "Uptime"
 
@@ -111,20 +121,20 @@ text_sensor:
     lambda: |-
       return {"${project_version}"};
     update_interval: 6h
-    
+
   - platform: version
     name: "ESPHome Version"
 
   - platform: wifi_info
     mac_address:
-      name: 'Mac Address'
+      name: "Mac Address"
       icon: mdi:wifi
     ip_address:
-      name: 'IP Address'
+      name: "IP Address"
       icon: mdi:wifi
     ssid:
-      name: 'SSID'
+      name: "SSID"
       icon: mdi:wifi-strength-2
     bssid:
-      name: 'BSSID'
+      name: "BSSID"
       icon: mdi:wifi-strength-2
