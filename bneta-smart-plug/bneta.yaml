@@ -98,8 +98,6 @@ sensor:
       name: "Current"
     power:
       name: "Power"
-      filters:
-        multiply: -1
     energy:
       name: "Energy"
     frequency:
