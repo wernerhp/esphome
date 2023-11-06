@@ -1,12 +1,9 @@
-# LibreTiny ESPHome v 2.7.0-dev
-# LibreTiny 1.1.0
-
 substitutions:
   name: "bneta"
   friendly_name: "BNETA Smart Plug"
   comment: "The BNETA Smart Plug is an energy monitoring, scheduling and control plug with load management and automation capability."
   project_name: "wernerhp.bneta"
-  project_version: "0.1.0"
+  project_version: "0.2.0"
 
   button_1_pin: P24
   relay_1_pin: P26
@@ -27,10 +24,10 @@ esphome:
     name: ${project_name}
     version: ${project_version}
 
-libretiny:
+bk72xx:
   board: cb2s
   framework:
-    version: 1.1.0
+    version: recommended
 
 # Enable logging
 logger:
