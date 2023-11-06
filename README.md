@@ -1,9 +1,10 @@
 # [ESP Home](https://esphome.io/)
-- Centurion D5 Evo
-- Garage Door Controller
+- [Centurion D5 Evo](https://github.com/wernerhp/esphome/tree/main/centurion-d5-evo)
+- [Garage Door Controller](https://github.com/wernerhp/esphome/tree/main/garage-door)
 
 # [LibreTiny](https://docs.libretiny.eu/)
-- CBI Astute Smart Controller (ASC)
-- CBI Astute Smart Isolator (ASI)
-- CBI Astute Smart Plug (ASP)
-- Smart Switch
+- [CBI Astute Smart Controller (ASC)](https://github.com/wernerhp/esphome/tree/main/cbi-astute-smart-controller)
+- [CBI Astute Smart Isolator (ASI)](https://github.com/wernerhp/esphome/tree/main/cbi-astute-smart-isolator)
+- [CBI Astute Smart Plug (ASP)](https://github.com/wernerhp/esphome/tree/main/cbi-astute-smart-plug)
+- [Smart Switch](https://github.com/wernerhp/esphome/tree/main/smart-switch)
+- [BNETA Smart Plug](https://github.com/wernerhp/esphome/tree/main/bneta-smart-plug)
