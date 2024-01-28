@@ -3,7 +3,7 @@ substitutions:
   friendly_name: "BNETA Smart Plug"
   comment: "The BNETA Smart Plug is an energy monitoring, scheduling and control plug with load management and automation capability."
   project_name: "wernerhp.bneta"
-  project_version: "0.2.0"
+  project_version: "0.2.1"
 
   button_1_pin: P24
   relay_1_pin: P26
@@ -95,12 +95,24 @@ sensor:
       name: "Current"
     power:
       name: "Power"
+      id: "power"
     energy:
       name: "Energy"
     frequency:
       name: "Frequency"
-      accuracy_decimals: 2
+      accuracy_decimals: 3
     update_interval: 1s
+
+  - platform: total_daily_energy
+    name: 'Total Daily Energy'
+    power_id: power
+    unit_of_measurement: 'kWh'
+    state_class: total_increasing
+    device_class: energy
+    accuracy_decimals: 3
+    filters:
+      # Multiplication factor from W to kW is 0.001
+      - multiply: 0.001
 
   - platform: uptime
     name: "Uptime"
@@ -133,3 +145,8 @@ text_sensor:
     bssid:
       name: "BSSID"
       icon: mdi:wifi-strength-2
+
+# Enable time component to reset energy at midnight
+time:
+  - platform: homeassistant
+    id: homeassistant_time
