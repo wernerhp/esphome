@@ -3,7 +3,7 @@ substitutions:
   friendly_name: "BNETA Smart Plug"
   comment: "The BNETA Smart Plug is an energy monitoring, scheduling and control plug with load management and automation capability."
   project_name: "wernerhp.bneta"
-  project_version: "0.2.1"
+  project_version: "0.2.2"
 
   button_1_pin: P24
   relay_1_pin: P26
@@ -58,6 +58,7 @@ switch:
     id: switch_1
     output: relay_1
     name: "Relay"
+    restore_mode: RESTORE_DEFAULT_OFF
 
 binary_sensor:
   - platform: gpio
