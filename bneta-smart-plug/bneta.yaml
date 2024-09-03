@@ -3,7 +3,7 @@ substitutions:
   friendly_name: "BNETA Smart Plug"
   comment: "The BNETA Smart Plug is an energy monitoring, scheduling and control plug with load management and automation capability."
   project_name: "wernerhp.bneta"
-  project_version: "0.2.2"
+  project_version: "0.2.5"
 
   button_1_pin: P24
   relay_1_pin: P26
@@ -12,8 +12,7 @@ substitutions:
   tx_pin: P11
 
 dashboard_import:
-  package_import_url: github://wernerhp/esphome/bneta-smart-plug/bneta.yaml@main
-  import_full_config: true
+  package_import_url: github://wernerhp/esphome/bneta-smart-plug/bneta.yaml
 
 esphome:
   name: ${name}
@@ -31,12 +30,18 @@ bk72xx:
 
 # Enable logging
 logger:
-  level: INFO
+  level: WARN
 
 # Enable Home Assistant API
 api:
 
 ota:
+  platform: esphome
+
+safe_mode:
+  disabled: false
+  reboot_timeout: 10min
+  num_attempts: 5
 
 wifi:
   # Enable fallback hotspot in case wifi connection fails
@@ -92,28 +97,26 @@ sensor:
     uart_id: uart_bus
     voltage:
       name: "Voltage"
+      accuracy_decimals: 1
     current:
       name: "Current"
+      accuracy_decimals: 2
     power:
       name: "Power"
-      id: "power"
+      accuracy_decimals: 0
+      id: power
     energy:
       name: "Energy"
+      accuracy_decimals: 2
     frequency:
       name: "Frequency"
-      accuracy_decimals: 3
+      accuracy_decimals: 2
     update_interval: 1s
 
   - platform: total_daily_energy
     name: 'Total Daily Energy'
+    accuracy_decimals: 2
     power_id: power
-    unit_of_measurement: 'kWh'
-    state_class: total_increasing
-    device_class: energy
-    accuracy_decimals: 3
-    filters:
-      # Multiplication factor from W to kW is 0.001
-      - multiply: 0.001
 
   - platform: uptime
     name: "Uptime"
