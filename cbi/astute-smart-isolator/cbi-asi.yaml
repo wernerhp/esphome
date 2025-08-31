@@ -1,0 +1,16 @@
+packages:
+  remote_package_shorthand: github://wernerhp/esphome/cbi/cbi.yaml@main
+
+dashboard_import:
+  package_import_url: github://wernerhp/esphome/blob/main/cbi/astute-smart-plug/cbi-asp.yaml@main
+  import_full_config: false
+
+substitutions:
+  name: "cbi-asi"
+  friendly_name: "CBI Astute Smart Isolator"
+  comment: "The Astute Smart Isolator is an energy monitoring, scheduling and control switch with load management and automation capability."
+  current_limit: "30"
+  current_resistor: "0.000994"
+  current_multiply: "0.878"
+  voltage_divider: "1566"
+  name_add_mac_suffix: "true"
