@@ -2,8 +2,8 @@ substitutions:
   name: "bneta"
   friendly_name: "BNETA Smart Plug"
   comment: "The BNETA Smart Plug is an energy monitoring, scheduling and control plug with load management and automation capability."
-  project_name: "wernerhp.bneta"
-  project_version: "0.2.5"
+  project_name: "wernerhp.bneta-smart-plug"
+  project_version: "0.3.0"
 
   button_1_pin: P24
   relay_1_pin: P26
@@ -22,6 +22,29 @@ esphome:
   project:
     name: ${project_name}
     version: ${project_version}
+  # Configuration to allow selection of Power restore Mode
+  on_boot:
+    - priority: 600
+      then:
+        - select.set_index:
+            id: power_mode
+            index: !lambda 'return id(restore_mode);'
+        - lambda: |-
+            int mode = id(restore_mode);
+            switch(mode) {
+              case 0:  // Always Off
+                id(switch_1).turn_off();
+                break;
+              case 1:  // Always On
+                id(switch_1).turn_on();
+                break;
+              case 2:  // Restore Previous State
+                // No action needed
+                break;
+              default:
+                id(switch_1).turn_off();
+                break;
+            }
 
 bk72xx:
   board: cb2s
@@ -31,12 +54,16 @@ bk72xx:
 # Enable logging
 logger:
   level: WARN
+  baud_rate: 0
 
 # Enable Home Assistant API
 api:
 
 ota:
   platform: esphome
+
+preferences:
+    flash_write_interval: 5min
 
 safe_mode:
   disabled: false
@@ -51,7 +78,13 @@ wifi:
 captive_portal:
 
 web_server:
-  port: 80
+ port: 80
+
+globals:
+  - id: restore_mode
+    type: int
+    restore_value: yes
+    initial_value: "2"  # 0 = Always Off, 1 = Always On, 2 = Restore Previous State
 
 output:
   - platform: gpio
@@ -63,22 +96,45 @@ switch:
     id: switch_1
     output: relay_1
     name: "Relay"
-    restore_mode: RESTORE_DEFAULT_OFF
+    restore_mode: RESTORE_DEFAULT_ON
 
 binary_sensor:
   - platform: gpio
-    pin: ${button_1_pin}
+    pin:
+      number: ${button_1_pin}
+      mode: INPUT_PULLUP
+      inverted: true
+    id: "power_button"
     name: "Button"
-    filters:
-      - delayed_on: 10ms
-      - delayed_off: 10ms
-    on_press:
-      - switch.toggle: switch_1
+    disabled_by_default: true
     internal: true
+    filters:
+      - delayed_on: 50ms
+    on_multi_click:
+      - timing:
+          - ON for at most 1s
+          - OFF for at least 0.2s
+        then:
+          - switch.toggle: switch_1
+      - timing:
+          - ON for at least 10s  # Long press for reset
+        then:
+          - button.press: factory_reset_button
 
 button:
   - platform: restart
     name: "Restart"
+    entity_category: diagnostic
+
+  - platform: factory_reset
+    id: factory_reset_button
+    name: "Factory Reset"
+    entity_category: diagnostic
+
+  - platform: safe_mode
+    name: "Safe Mode"
+    internal: false
+    entity_category: diagnostic
 
 status_led:
   pin:
@@ -91,6 +147,7 @@ uart:
   rx_pin: ${rx_pin}
   baud_rate: 4800
   stop_bits: 1
+  rx_timeout: 100ms
 
 sensor:
   - platform: bl0942
@@ -111,7 +168,8 @@ sensor:
     frequency:
       name: "Frequency"
       accuracy_decimals: 2
-    update_interval: 1s
+      disabled_by_default: true
+    update_interval: 10s
 
   - platform: total_daily_energy
     name: 'Total Daily Energy'
@@ -120,35 +178,59 @@ sensor:
 
   - platform: uptime
     name: "Uptime"
+    disabled_by_default: true
 
   - platform: wifi_signal
     name: "WiFi Signal"
+    disabled_by_default: true
 
 text_sensor:
   - platform: template
-    name: "Firmware version"
+    name: "BNETA Version"
     icon: "mdi:label-outline"
     entity_category: diagnostic
     lambda: |-
       return {"${project_version}"};
-    update_interval: 6h
+    update_interval: 24h
 
   - platform: version
     name: "ESPHome Version"
+    hide_timestamp: true
+
+  - platform: libretiny
+    version:
+      name: "LibreTiny Version"
+      disabled_by_default: true
 
   - platform: wifi_info
     mac_address:
       name: "Mac Address"
       icon: mdi:wifi
+      disabled_by_default: true
     ip_address:
       name: "IP Address"
       icon: mdi:wifi
+      disabled_by_default: true
     ssid:
       name: "SSID"
       icon: mdi:wifi-strength-2
-    bssid:
-      name: "BSSID"
-      icon: mdi:wifi-strength-2
+      disabled_by_default: true
+
+select:
+  - platform: template
+    name: "Power On State"
+    id: "power_mode"
+    optimistic: true
+    icon: mdi:electric-switch
+    initial_option: "Restore Previous State"  # Matches restore_mode: 2
+    options:
+      - "Always Off"              # index 0 → restore_mode 0
+      - "Always On"               # index 1 → restore_mode 1
+      - "Restore Previous State"  # index 2 → restore_mode 2
+    on_value:
+      then:
+        - lambda: |-
+            id(restore_mode) = i;
 
 # Enable time component to reset energy at midnight
 time:
