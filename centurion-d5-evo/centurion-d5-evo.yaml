@@ -3,7 +3,8 @@ substitutions:
   friendly_name: "Centurion D5 Evo"
   comment: "Control your Centurion D5 Evo gate motor remotely."
   project_name: "wernerhp.esphome_centurion_d5_evo"
-  project_version: "1.0.0"
+  project_version: "1.1.0"
+  name_add_mac_suffix: true
 
   relay_1_pin: GPIO32
   relay_2_pin: GPIO33
@@ -15,11 +16,26 @@ esphome:
   name: ${name}
   friendly_name: ${friendly_name}
   comment: ${comment}
-  name_add_mac_suffix: true
+  name_add_mac_suffix: ${name_add_mac_suffix}
   
   project:
     name: ${project_name}
     version: ${project_version}
+
+  on_boot:
+    priority: -100  # Run after all sensors are initialized
+    then:
+      - lambda: |-
+          // Set initial gate state based on LED
+          if (id(status_led).state) {
+            id(status).publish_state("Open");
+            id(gate).position = cover::COVER_OPEN;
+          } else {
+            id(status).publish_state("Closed");
+            id(gate).position = cover::COVER_CLOSED;
+          }
+          id(gate).current_operation = CoverOperation::COVER_OPERATION_IDLE;
+          id(gate).publish_state();
 
 esp32:
   board: esp32dev
@@ -34,6 +50,11 @@ logger:
 api:
 
 ota:
+  - platform: esphome
+
+safe_mode:
+  reboot_timeout: 10min
+  num_attempts: 5
 
 dashboard_import:
   package_import_url: github://wernerhp/esphome.centurion_d5_evo/centurion-d5-evo.yaml@main
@@ -44,11 +65,14 @@ wifi:
 
   # Enable fallback hotspot (captive portal) in case wifi connection fails
   ap:
+    password: d5evo12345
   
 improv_serial:
 
 captive_portal:
 
+web_server:
+  version: 3
 
 binary_sensor:
   - platform: gpio
@@ -58,11 +82,20 @@ binary_sensor:
     entity_category: diagnostic
     icon: mdi:led-outline
     disabled_by_default: true
-    publish_initial_state: true
+    # publish_initial_state: true
+    trigger_on_initial_state: true
     filters:
         delayed_on_off: 100ms
+    # Blink codes:
+    #   Off = Gate is closed
+    #   On = Gate is partially or fully open
+    #   Continuous slow flash = Gate is opening
+    #   Continuous fast flash = Gate is closing
+    #   1 flash / 2 sec = Pillar light override activated
+    #   2 flashes / 2 sec = No mains present
+    #   3 flashes / 2 sec = Battery voltage is low
     on_multi_click:
-      - timing: # Closed
+      - timing: # Off = Closed
           - OFF for at least 2000ms
         then:
           - logger.log: "Closed"
@@ -70,39 +103,27 @@ binary_sensor:
               id: status
               state: "Closed"
           - lambda: |-
+              id(gate).position = cover::COVER_CLOSED;
               id(gate).current_operation = CoverOperation::COVER_OPERATION_IDLE;
               id(gate).publish_state();
-        invalid_cooldown: 100ms
+        invalid_cooldown: 0ms
 
-      - timing: # Open
-          - ON for at least 2000ms
+      - timing: # On = Partially or fully open
+          - ON for at least 1000ms
         then:
           - logger.log: "Open"
           - text_sensor.template.publish:
               id: status
               state: "Open"
           - lambda: |-
+              id(gate).position = cover::COVER_OPEN;
               id(gate).current_operation = CoverOperation::COVER_OPERATION_IDLE;
               id(gate).publish_state();
-        invalid_cooldown: 100ms
+        invalid_cooldown: 0ms
 
-      - timing: # Closing
-        - ON for 100ms to 200ms
-        - OFF for 100ms to 200ms
-        - ON for 100ms to 200ms
-        - OFF for 100ms to 200ms
-        - ON for 100ms to 200ms
-        - OFF for 100ms to 200ms
-        - ON for 100ms to 200ms
-        - OFF for 100ms to 200ms
-        - ON for 100ms to 200ms
-        - OFF for 100ms to 200ms
-        - ON for 100ms to 200ms
-        - OFF for 100ms to 200ms
-        - ON for 100ms to 200ms
-        - OFF for 100ms to 200ms
-        - ON for 100ms to 200ms
-        - OFF for 100ms to 200ms
+      - timing: # Continuous fast flash = Closing
+          - ON for 125ms to 175ms
+          - OFF for 125ms to 175ms
         then:
           - logger.log: "Closing"
           - text_sensor.template.publish:
@@ -111,17 +132,11 @@ binary_sensor:
           - lambda: |-
               id(gate).current_operation = CoverOperation::COVER_OPERATION_CLOSING;
               id(gate).publish_state();
-        invalid_cooldown: 100ms
+        invalid_cooldown: 0ms
 
-      - timing: # Opening
-          - ON for 200ms to 400ms
-          - OFF for 200ms to 400ms
-          - ON for 200ms to 400ms
-          - OFF for 200ms to 400ms
-          - ON for 200ms to 400ms
-          - OFF for 200ms to 400ms
-          - ON for 200ms to 400ms
-          - OFF for 200ms to 400ms
+      - timing: # Continuous slow flash = Opening (~300ms cycle)
+          - ON for 275ms to 400ms
+          - OFF for 275ms to 400ms
         then:
           - logger.log: "Opening"
           - text_sensor.template.publish:
@@ -130,11 +145,11 @@ binary_sensor:
           - lambda: |-
               id(gate).current_operation = CoverOperation::COVER_OPERATION_OPENING;
               id(gate).publish_state();
-        invalid_cooldown: 100ms
+        invalid_cooldown: 0ms
 
-      - timing: # Pillar light override
-          - ON for 200ms to 300ms
-          - OFF for 1700ms to 1800ms
+      - timing: # 1 flash / 2 sec = Pillar light override
+          - ON for 150ms to 275ms
+          - OFF for 1700ms to 1900ms
         then:
           - logger.log: "Pillar light override"
           - text_sensor.template.publish:
@@ -142,11 +157,11 @@ binary_sensor:
               state: "Pillar light override"
         invalid_cooldown: 100ms
 
-      - timing: # No Mains
-          - ON for 200ms to 300ms
-          - OFF for 200ms to 300ms
-          - ON for 200ms to 300ms
-          - OFF for 1200ms to 1400ms
+      - timing: # 2 flashes / 2 sec = No mains
+          - ON for 150ms to 275ms
+          - OFF for 150ms to 275ms
+          - ON for 150ms to 275ms
+          - OFF for 1100ms to 1500ms
         then:
           - logger.log: "No Mains"
           - text_sensor.template.publish:
@@ -154,13 +169,13 @@ binary_sensor:
               state: "No Mains"
         invalid_cooldown: 100ms
 
-      - timing: # Battery Low
-          - ON for 200ms to 300ms
-          - OFF for 200ms to 300ms
-          - ON for 200ms to 300ms
-          - OFF for 200ms to 300ms
-          - ON for 200ms to 300ms
-          - OFF for 500ms to 1000ms
+      - timing: # 3 flashes / 2 sec = Battery low
+          - ON for 150ms to 275ms
+          - OFF for 150ms to 275ms
+          - ON for 150ms to 275ms
+          - OFF for 150ms to 275ms
+          - ON for 150ms to 275ms
+          - OFF for 400ms to 1100ms
         then:
           - logger.log: "Low Battery"
           - text_sensor.template.publish:
@@ -194,7 +209,7 @@ button:
     disabled_by_default: true
     duration: 3000ms # Autoclose override time
     name: "Open / Manual Close"
-    icon: "mdi:gate"
+    icon: "mdi:gate-alert"
   - platform: output
     output: relay_3
     id: button_3
@@ -204,25 +219,31 @@ button:
 
 switch:
   - platform: gpio
-    pin:
-      number: ${relay_4_pin}
-    id: relay_4
-    icon: "mdi:lock"
+    pin: ${relay_4_pin}
+    id: lock_relay
+    internal: true
+    restore_mode: RESTORE_DEFAULT_OFF  # Remember state, default to unlocked
+
+lock:
+  - platform: template
     name: "Lock"
+    id: gate_lock
+    lambda: |-
+      if (id(lock_relay).state) {
+        return LOCK_STATE_LOCKED;
+      } else {
+        return LOCK_STATE_UNLOCKED;
+      }
+    lock_action:
+      - switch.turn_on: lock_relay
+    unlock_action:
+      - switch.turn_off: lock_relay
 
 cover:
   - platform: template
     name: "Gate"
     device_class: gate
     id: gate
-    lambda: |-
-      if (id(status).state == "Open") {
-        return COVER_OPEN;
-      } else if (id(status).state == "Closed") {
-        return COVER_CLOSED;
-      } else {
-        return {};
-      }
     open_action:
       - button.press: button_1
     close_action:
@@ -234,14 +255,14 @@ cover:
 # # Sensors for ESP version and WIFI information
 text_sensor:
   - platform: template
-    icon: mdi:information-outline
+    icon: mdi:gate
     id: status
     name: "Status"
   # Installed version
   - platform: template
     name: "Device Version"
     id: device_version
-    icon: "mdi:label-outline"
+    icon: "mdi:tag"
     entity_category: diagnostic
     lambda: |-
       return {"${project_version}"};
@@ -254,16 +275,25 @@ text_sensor:
   - platform: wifi_info
     ip_address:
       name: 'IP Address'
-      icon: mdi:wifi
+      icon: mdi:ip-network
     ssid:
       name: 'SSID'
-      icon: mdi:wifi-strength-2
+      icon: mdi:wifi
 
 sensor:
   # Uptime
   - platform: uptime
     name: Uptime Sensor
+    icon: mdi:timer-outline
   # WiFi signal
   - platform: wifi_signal
     name: "WiFi Signal"
+    icon: mdi:wifi-strength-2
     update_interval: 120s
+
+esp32_ble_tracker:
+  scan_parameters:
+    active: true
+
+bluetooth_proxy:
+  active: true
