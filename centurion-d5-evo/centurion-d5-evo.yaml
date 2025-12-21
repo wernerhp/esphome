@@ -3,7 +3,7 @@ substitutions:
   friendly_name: "Centurion D5 Evo"
   comment: "Control your Centurion D5 Evo gate motor remotely."
   project_name: "wernerhp.esphome_centurion_d5_evo"
-  project_version: "1.1.0"
+  project_version: "1.1.1"
   name_add_mac_suffix: true
 
   relay_1_pin: GPIO32
@@ -62,13 +62,14 @@ dashboard_import:
 
 wifi:
   power_save_mode: NONE
+  networks:
+    - ssid: !secret wifi_iot_ssid
+      password: !secret wifi_iot_password
 
   # Enable fallback hotspot (captive portal) in case wifi connection fails
   ap:
     password: d5evo12345
   
-improv_serial:
-
 captive_portal:
 
 web_server:
@@ -290,10 +291,3 @@ sensor:
     name: "WiFi Signal"
     icon: mdi:wifi-strength-2
     update_interval: 120s
-
-esp32_ble_tracker:
-  scan_parameters:
-    active: true
-
-bluetooth_proxy:
-  active: true
