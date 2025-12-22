@@ -1,0 +1,14 @@
+esphome:
+  name: minimal-test
+  friendly_name: "Minimal Test"
+
+esp32:
+  board: esp32dev
+  framework:
+    type: arduino
+
+logger:
+  level: DEBUG
+  baud_rate: 115200
+
+# No WiFi, no API, no GPIO - just boot and log

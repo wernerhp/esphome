@@ -3,7 +3,7 @@ substitutions:
   friendly_name: "Centurion D5 Evo"
   comment: "Control your Centurion D5 Evo gate motor remotely."
   project_name: "wernerhp.esphome_centurion_d5_evo"
-  project_version: "1.1.1"
+  project_version: "2.0.0"
   name_add_mac_suffix: true
 
   relay_1_pin: GPIO32
@@ -40,7 +40,7 @@ esphome:
 esp32:
   board: esp32dev
   framework:
-    type: arduino
+    type: esp-idf
 
 # Enable logging
 logger:
@@ -51,25 +51,37 @@ api:
 
 ota:
   - platform: esphome
+    password: !secret ota_password
+  - platform: http_request
 
 safe_mode:
   reboot_timeout: 10min
   num_attempts: 5
 
+update:
+  - platform: http_request
+    name: "Firmware Update"
+    source: https://github.com/wernerhp/esphome/releases/latest/download/centurion-d5-evo-ota.bin
+    update_interval: 6h
+
 dashboard_import:
-  package_import_url: github://wernerhp/esphome.centurion_d5_evo/centurion-d5-evo.yaml@main
+  package_import_url: github://wernerhp/esphome/centurion-d5-evo/centurion-d5-evo.yaml@main
   import_full_config: false
+
+# Fallback OTA via HTTP (backup method)
+http_request:
+  verify_ssl: false
+  timeout: 10s
 
 wifi:
   power_save_mode: NONE
-  networks:
-    - ssid: !secret wifi_iot_ssid
-      password: !secret wifi_iot_password
 
   # Enable fallback hotspot (captive portal) in case wifi connection fails
   ap:
     password: d5evo12345
   
+improv_serial:
+
 captive_portal:
 
 web_server:
@@ -291,3 +303,10 @@ sensor:
     name: "WiFi Signal"
     icon: mdi:wifi-strength-2
     update_interval: 120s
+
+esp32_ble_tracker:
+  scan_parameters:
+    active: true
+
+bluetooth_proxy:
+  active: true
