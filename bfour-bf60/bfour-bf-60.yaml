@@ -1,0 +1,199 @@
+substitutions:
+  name: bfour-bf-60
+  friendly_name: BFOUR BF-60
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+  min_version: 2025.10.3
+  name_add_mac_suffix: true
+
+esp32:
+  board: esp32-c3-devkitm-1
+  framework:
+    type: esp-idf
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+api:
+
+logger:
+  level: INFO
+  logs:
+    esp32_ble_tracker: INFO
+    ble_client: INFO
+    sensor: INFO
+
+ota:
+  - platform: esphome
+
+captive_portal:
+
+web_server:
+  version: 3
+
+# BLE scanning
+esp32_ble_tracker:
+  scan_parameters:
+    interval: 1100ms
+    window: 1100ms
+    active: true
+
+# BLE Client - Direct connection to BFOUR Base Unit
+ble_client:
+  - mac_address: "02:CA:6A:21:2D:4D"
+    id: grill_bt5
+    auto_connect: true
+    on_connect:
+      then:
+        - lambda: 'ESP_LOGI("grill", "Connected to BFOUR Base Unit");'
+    on_disconnect:
+      then:
+        - lambda: 'ESP_LOGW("grill", "Disconnected from BFOUR Base Unit");'
+
+sensor:
+  # Main temperature data from FFB2 (NOTIFY characteristic)
+  - platform: ble_client
+    ble_client_id: grill_bt5
+    type: characteristic
+    name: "Grill Temperature Data"
+    service_uuid: '0000FFB0-0000-1000-8000-00805F9B34FB'
+    characteristic_uuid: '0000FFB2-0000-1000-8000-00805F9B34FB'
+    id: grill_data_raw
+    notify: true
+    internal: true
+    lambda: |-
+      ESP_LOGD("grill", "FFB2 notification: %d bytes", x.size());
+      
+      // Log raw data
+      std::string hex_str = "";
+      for (int i = 0; i < x.size(); i++) {
+        char buf[4];
+        sprintf(buf, "%02X ", x[i]);
+        hex_str += buf;
+      }
+      ESP_LOGD("grill", "Raw: %s", hex_str.c_str());
+      
+      // Parse temperature data (protocol: starts with 0x55)
+      if (x.size() >= 15 && x[0] == 0x55) {
+        // Black probe temperature (bytes 2-3, big-endian)
+        uint16_t black_raw = (x[2] << 8) | x[3];
+        if (black_raw != 0xFFFF) {
+          float black_temp = black_raw / 10.0;
+          id(black_probe_temp).publish_state(black_temp);
+          ESP_LOGI("grill", "Black Probe: %.1f°C", black_temp);
+        } else {
+          id(black_probe_temp).publish_state(NAN);
+        }
+        
+        // White probe temperature (bytes 4-5, big-endian)
+        uint16_t white_raw = (x[4] << 8) | x[5];
+        if (white_raw != 0xFFFF) {
+          float white_temp = white_raw / 10.0;
+          id(white_probe_temp).publish_state(white_temp);
+          ESP_LOGI("grill", "White Probe: %.1f°C", white_temp);
+        } else {
+          id(white_probe_temp).publish_state(NAN);
+        }
+      }
+      return NAN;
+
+  # Template sensors for Home Assistant
+  - platform: template
+    name: "Black Probe Temperature"
+    id: black_probe_temp
+    unit_of_measurement: "°C"
+    device_class: temperature
+    state_class: measurement
+    accuracy_decimals: 1
+    icon: "mdi:thermometer"
+
+  - platform: template
+    name: "White Probe Temperature"
+    id: white_probe_temp
+    unit_of_measurement: "°C"
+    device_class: temperature
+    state_class: measurement
+    accuracy_decimals: 1
+    icon: "mdi:thermometer"
+
+# Global variables to store preset values
+globals:
+  - id: black_preset_value
+    type: int
+    restore_value: yes
+    initial_value: '0'
+  - id: white_preset_value
+    type: int
+    restore_value: yes
+    initial_value: '0'
+
+select:
+  # Temperature Unit
+  - platform: template
+    name: "Grill Temperature Unit"
+    id: temp_unit
+    icon: "mdi:temperature-celsius"
+    optimistic: true
+    options:
+      - "Celsius"
+      - "Fahrenheit"
+    initial_option: "Celsius"
+    set_action:
+      - ble_client.ble_write:
+          id: grill_bt5
+          service_uuid: '0000FFB0-0000-1000-8000-00805F9B34FB'
+          characteristic_uuid: '0000FFB1-0000-1000-8000-00805F9B34FB'
+          value: !lambda |-
+            uint8_t unit_value = (x == "Fahrenheit") ? 0x02 : 0x01;
+            return {0x55, 0x01, unit_value, 0x00};
+      - lambda: 'ESP_LOGI("grill", "Temperature unit set to: %s", x.c_str());'
+
+number:
+  # Black Probe Target Temperature
+  - platform: template
+    name: "Black Probe Target Temperature"
+    id: black_target_temp
+    min_value: 0
+    max_value: 300
+    step: 1
+    unit_of_measurement: "°C"
+    mode: box
+    icon: "mdi:thermometer-chevron-up"
+    optimistic: true
+    set_action:
+      - ble_client.ble_write:
+          id: grill_bt5
+          service_uuid: '0000FFB0-0000-1000-8000-00805F9B34FB'
+          characteristic_uuid: '0000FFB1-0000-1000-8000-00805F9B34FB'
+          value: !lambda |-
+            uint16_t temp_raw = (uint16_t)(x);
+            return {0x55, 0x02, 0x01, (uint8_t)(temp_raw >> 8), (uint8_t)(temp_raw & 0xFF)};
+      - lambda: |-
+          id(black_preset_value) = (int)x;
+          ESP_LOGI("grill", "Set black preset: %.0f°C", x);
+
+  # White Probe Target Temperature
+  - platform: template
+    name: "White Probe Target Temperature"
+    id: white_target_temp
+    min_value: 0
+    max_value: 300
+    step: 1
+    unit_of_measurement: "°C"
+    mode: box
+    icon: "mdi:thermometer-chevron-up"
+    optimistic: true
+    set_action:
+      - ble_client.ble_write:
+          id: grill_bt5
+          service_uuid: '0000FFB0-0000-1000-8000-00805F9B34FB'
+          characteristic_uuid: '0000FFB1-0000-1000-8000-00805F9B34FB'
+          value: !lambda |-
+            uint16_t temp_raw = (uint16_t)(x);
+            return {0x55, 0x02, 0x02, (uint8_t)(temp_raw >> 8), (uint8_t)(temp_raw & 0xFF)};
+      - lambda: |-
+          id(white_preset_value) = (int)x;
+          ESP_LOGI("grill", "Set white preset: %.0f°C", x);
