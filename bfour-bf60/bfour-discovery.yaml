@@ -1,0 +1,87 @@
+# BFOUR BLE Device Discovery
+# Flash this first to discover your BF-60 and BF-40 MAC addresses.
+# Then update bfour-bf-60.yaml with the discovered addresses.
+
+substitutions:
+  name: bfour-discovery
+  friendly_name: BFOUR Discovery
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+  name_add_mac_suffix: true
+
+esp32:
+  board: esp32-c3-devkitm-1
+  framework:
+    type: esp-idf
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+api:
+
+logger:
+  level: DEBUG
+
+ota:
+  - platform: esphome
+
+web_server:
+  version: 3
+
+# BLE Scanner for device discovery
+esp32_ble_tracker:
+  scan_parameters:
+    interval: 1100ms
+    window: 1100ms
+    active: true
+  on_ble_advertise:
+    - then:
+        - lambda: |-
+            std::string name = x.get_name();
+            // Log BFOUR devices with clear formatting
+            if (name == "Grill BT5.0") {
+              ESP_LOGW("FOUND", "");
+              ESP_LOGW("FOUND", "╔════════════════════════════════════════╗");
+              ESP_LOGW("FOUND", "║  BFOUR BF-60 BASE STATION FOUND!       ║");
+              ESP_LOGW("FOUND", "╠════════════════════════════════════════╣");
+              ESP_LOGW("FOUND", "║  MAC: %s              ║", x.address_str().c_str());
+              ESP_LOGW("FOUND", "║  RSSI: %d dBm                          ║", x.get_rssi());
+              ESP_LOGW("FOUND", "╚════════════════════════════════════════╝");
+              ESP_LOGW("FOUND", "");
+              id(found_base).publish_state(x.address_str().c_str());
+            }
+            if (name == "BF-40") {
+              ESP_LOGI("FOUND", "");
+              ESP_LOGI("FOUND", "┌────────────────────────────────────────┐");
+              ESP_LOGI("FOUND", "│  BF-40 PROBE FOUND!                    │");
+              ESP_LOGI("FOUND", "├────────────────────────────────────────┤");
+              ESP_LOGI("FOUND", "│  MAC: %s              │", x.address_str().c_str());
+              ESP_LOGI("FOUND", "│  RSSI: %d dBm                          │", x.get_rssi());
+              ESP_LOGI("FOUND", "└────────────────────────────────────────┘");
+              ESP_LOGI("FOUND", "");
+              // Update the appropriate probe sensor
+              if (id(found_probe1).state.empty() || id(found_probe1).state == x.address_str()) {
+                id(found_probe1).publish_state(x.address_str().c_str());
+              } else if (id(found_probe2).state.empty() || id(found_probe2).state == x.address_str()) {
+                id(found_probe2).publish_state(x.address_str().c_str());
+              }
+            }
+
+text_sensor:
+  - platform: template
+    name: "Found BF-60 Base MAC"
+    id: found_base
+    icon: "mdi:bluetooth"
+    
+  - platform: template
+    name: "Found BF-40 Probe 1 MAC"
+    id: found_probe1
+    icon: "mdi:thermometer-probe"
+    
+  - platform: template
+    name: "Found BF-40 Probe 2 MAC"
+    id: found_probe2
+    icon: "mdi:thermometer-probe"

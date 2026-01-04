@@ -1,40 +1,60 @@
 substitutions:
   name: bfour-bf-60
   friendly_name: BFOUR BF-60
+  # REQUIRED: Set to your BF-60 base station MAC address (found via bfour-discovery.yaml)
+  grill_mac: "00:00:00:00:00:00"
 
 esphome:
   name: ${name}
   friendly_name: ${friendly_name}
   min_version: 2025.10.3
   name_add_mac_suffix: true
+  project:
+    name: wernerhp.bfour-bf60
+    version: "1.0.0"
 
 esp32:
   board: esp32-c3-devkitm-1
   framework:
     type: esp-idf
 
-wifi:
-  ssid: !secret wifi_ssid
-  password: !secret wifi_password
+# Dashboard import - allows device adoption from ESPHome dashboard
+dashboard_import:
+  package_import_url: github://wernerhp/esphome/bfour-bf60/bfour-bf-60.yaml@main
+  import_full_config: false
 
+wifi:
+  ap:
+    ssid: "${name}"
+    password: "bfour-bf60"
+
+# API is required for Home Assistant and dashboard import
 api:
 
 logger:
-  level: INFO
+  level: WARN
   logs:
-    esp32_ble_tracker: INFO
-    ble_client: INFO
-    sensor: INFO
+    esp32_ble_tracker: WARN
+    ble_client: WARN
+    sensor: WARN
 
 ota:
   - platform: esphome
+  - platform: http_request
 
+http_request:
+
+# Allows WiFi provisioning via captive portal
 captive_portal:
 
-web_server:
-  version: 3
+# Allows WiFi provisioning via Bluetooth (ESP32 only)
+esp32_improv:
+  authorizer: none
 
-# BLE scanning
+# Allows WiFi provisioning via serial
+improv_serial:
+
+# BLE scanning for connection management
 esp32_ble_tracker:
   scan_parameters:
     interval: 1100ms
@@ -43,21 +63,84 @@ esp32_ble_tracker:
 
 # BLE Client - Direct connection to BFOUR Base Unit
 ble_client:
-  - mac_address: "02:CA:6A:21:2D:4D"
+  - mac_address: ${grill_mac}
     id: grill_bt5
     auto_connect: true
     on_connect:
       then:
-        - lambda: 'ESP_LOGI("grill", "Connected to BFOUR Base Unit");'
+        - lambda: |-
+            ESP_LOGI("grill", "Connected to BFOUR Base Unit");
         - binary_sensor.template.publish:
             id: grill_connection_status
             state: ON
+        - delay: 3s
+        # Restore saved target temperatures
+        - lambda: |-
+            int black_target = id(black_preset_value);
+            int white_target = id(white_preset_value);
+            ESP_LOGI("grill", "Restoring saved targets - Black: %d°C, White: %d°C", black_target, white_target);
+        - if:
+            condition:
+              lambda: 'return id(black_preset_value) > 0;'
+            then:
+              - ble_client.ble_write:
+                  id: grill_bt5
+                  service_uuid: '0000FFB0-0000-1000-8000-00805F9B34FB'
+                  characteristic_uuid: '0000FFB1-0000-1000-8000-00805F9B34FB'
+                  value: !lambda |-
+                    uint16_t temp = id(black_preset_value);
+                    return {0x55, 0x02, 0x01, (uint8_t)(temp >> 8), (uint8_t)(temp & 0xFF)};
+              - lambda: 'id(black_target_temp).publish_state(id(black_preset_value));'
+        - delay: 500ms
+        - if:
+            condition:
+              lambda: 'return id(white_preset_value) > 0;'
+            then:
+              - ble_client.ble_write:
+                  id: grill_bt5
+                  service_uuid: '0000FFB0-0000-1000-8000-00805F9B34FB'
+                  characteristic_uuid: '0000FFB1-0000-1000-8000-00805F9B34FB'
+                  value: !lambda |-
+                    uint16_t temp = id(white_preset_value);
+                    return {0x55, 0x02, 0x02, (uint8_t)(temp >> 8), (uint8_t)(temp & 0xFF)};
+              - lambda: 'id(white_target_temp).publish_state(id(white_preset_value));'
     on_disconnect:
       then:
         - lambda: 'ESP_LOGW("grill", "Disconnected from BFOUR Base Unit");'
         - binary_sensor.template.publish:
             id: grill_connection_status
             state: OFF
+        - binary_sensor.template.publish:
+            id: black_probe_connected
+            state: OFF
+        - binary_sensor.template.publish:
+            id: white_probe_connected
+            state: OFF
+        - binary_sensor.template.publish:
+            id: black_probe_alarm
+            state: OFF
+        - binary_sensor.template.publish:
+            id: white_probe_alarm
+            state: OFF
+
+text_sensor:
+  # Raw BLE Data Display (internal - for debugging only)
+  - platform: template
+    name: "Grill Raw BLE Data"
+    id: grill_raw_ble_data
+    icon: "mdi:code-brackets"
+    entity_category: diagnostic
+    internal: true
+
+  # Firmware Version from characteristic 0x0003
+  - platform: ble_client
+    ble_client_id: grill_bt5
+    name: "Grill Firmware Version"
+    id: grill_firmware
+    icon: "mdi:chip"
+    entity_category: diagnostic
+    service_uuid: '0000FE59-0000-1000-8000-00805F9B34FB'
+    characteristic_uuid: '00000003-0000-1000-8000-00805F9B34FB'
 
 binary_sensor:
   # BLE Connection Status
@@ -67,7 +150,98 @@ binary_sensor:
     device_class: connectivity
     icon: "mdi:bluetooth-connect"
 
+  # Black Probe Connection Status
+  - platform: template
+    name: "Black Probe Connected"
+    id: black_probe_connected
+    device_class: connectivity
+    icon: "mdi:thermometer-probe"
+
+  # White Probe Connection Status
+  - platform: template
+    name: "White Probe Connected"
+    id: white_probe_connected
+    device_class: connectivity
+    icon: "mdi:thermometer-probe"
+
+  # Black Probe Alarm (target temperature reached)
+  - platform: template
+    name: "Black Probe Alarm"
+    id: black_probe_alarm
+    device_class: heat
+    icon: "mdi:thermometer-alert"
+
+  # White Probe Alarm (target temperature reached)
+  - platform: template
+    name: "White Probe Alarm"
+    id: white_probe_alarm
+    device_class: heat
+    icon: "mdi:thermometer-alert"
+
+  # Black Probe Alarm Acknowledged (button pressed on base station)
+  - platform: template
+    name: "Black Probe Alarm Acknowledged"
+    id: black_probe_alarm_ack
+    icon: "mdi:bell-check"
+    entity_category: diagnostic
+    filters:
+      - delayed_off: 5s
+
+  # White Probe Alarm Acknowledged (button pressed on base station)
+  - platform: template
+    name: "White Probe Alarm Acknowledged"
+    id: white_probe_alarm_ack
+    icon: "mdi:bell-check"
+    entity_category: diagnostic
+    filters:
+      - delayed_off: 5s
+
+button:
+  # Restart device
+  - platform: restart
+    name: "Restart"
+    icon: "mdi:restart"
+    entity_category: config
+
+  # Factory reset - clears WiFi credentials and all saved data
+  - platform: factory_reset
+    name: "Factory Reset"
+    icon: "mdi:factory"
+    entity_category: config
+
 sensor:
+  # RSSI Signal Strength
+  - platform: ble_rssi
+    mac_address: ${grill_mac}
+    name: "Grill RSSI"
+    id: grill_rssi
+    icon: "mdi:signal"
+    internal: true
+    on_value:
+      then:
+        - lambda: |-
+            // Convert RSSI to percentage
+            // Based on real-world testing: -85 dBm (best, devices touching) to -95 dBm (poor)
+            // The BF-60 has a weak BLE radio - even at 0cm distance, RSSI is only -85 dBm
+            float rssi = x;
+            float min_rssi = -95.0;  // 0% - barely usable
+            float max_rssi = -85.0;  // 100% - excellent (device right next to ESP32)
+            float percentage = ((rssi - min_rssi) / (max_rssi - min_rssi)) * 100.0;
+            // Clamp to 0-100%
+            if (percentage < 0) percentage = 0;
+            if (percentage > 100) percentage = 100;
+            id(grill_signal_strength).publish_state(percentage);
+
+  # RSSI as percentage for better UX
+  - platform: template
+    name: "Grill Signal Strength"
+    id: grill_signal_strength
+    unit_of_measurement: "%"
+    icon: "mdi:signal"
+    accuracy_decimals: 0
+    device_class: signal_strength
+    state_class: measurement
+
   # Main temperature data from FFB2 (NOTIFY characteristic)
   - platform: ble_client
     ble_client_id: grill_bt5
@@ -79,37 +253,93 @@ sensor:
     notify: true
     internal: true
     lambda: |-
-      ESP_LOGD("grill", "FFB2 notification: %d bytes", x.size());
-      
-      // Log raw data
+      // Log raw data at debug level
       std::string hex_str = "";
       for (int i = 0; i < x.size(); i++) {
         char buf[4];
         sprintf(buf, "%02X ", x[i]);
         hex_str += buf;
       }
-      ESP_LOGD("grill", "Raw: %s", hex_str.c_str());
+      ESP_LOGD("grill", "FFB2 Raw: %s", hex_str.c_str());
       
-      // Parse temperature data (protocol: starts with 0x55)
-      if (x.size() >= 15 && x[0] == 0x55) {
+      // Publish to text sensor for visibility
+      std::string display = "FFB2[" + std::to_string(x.size()) + "]: " + hex_str;
+      id(grill_raw_ble_data).publish_state(display.c_str());
+      
+      // Check for alarm acknowledgment packet (5 bytes: 55 07 01 XX checksum)
+      // XX = 0x02 for White probe, 0x03 for Black probe
+      // NOTE: This packet is only sent when user presses touch button on base station
+      // to acknowledge/silence the alarm - NOT when the alarm first triggers!
+      if (x.size() == 5 && x[0] == 0x55 && x[1] == 0x07 && x[2] == 0x01) {
+        uint8_t probe_id = x[3];
+        if (probe_id == 0x02) {
+          ESP_LOGI("grill", "WHITE PROBE ALARM ACKNOWLEDGED (button pressed)");
+          id(white_probe_alarm_ack).publish_state(true);
+        } else if (probe_id == 0x03) {
+          ESP_LOGI("grill", "BLACK PROBE ALARM ACKNOWLEDGED (button pressed)");
+          id(black_probe_alarm_ack).publish_state(true);
+        }
+        return NAN;
+      }
+      
+      // Parse temperature data (protocol: starts with 0x55, 15 bytes)
+      // Byte 0: 0x55 (header)
+      // Byte 1: 0x00 (packet type - temperature data)
+      // Bytes 2-3: Black probe temp (big-endian, /10 for °C, 0xFFFF = disconnected)
+      // Bytes 4-5: White probe temp (big-endian, /10 for °C, 0xFFFF = disconnected)
+      // Bytes 6-14: Reserved (0xFF when probes disconnected)
+      if (x.size() >= 6 && x[0] == 0x55 && x[1] == 0x00) {
+        // Reset alarms when we get normal temperature data
+        // (alarms auto-clear when new temp data arrives)
+        
         // Black probe temperature (bytes 2-3, big-endian)
         uint16_t black_raw = (x[2] << 8) | x[3];
-        if (black_raw != 0xFFFF) {
+        bool black_connected = (black_raw != 0xFFFF);
+        id(black_probe_connected).publish_state(black_connected);
+        if (black_connected) {
           float black_temp = black_raw / 10.0;
           id(black_probe_temp).publish_state(black_temp);
-          ESP_LOGI("grill", "Black Probe: %.1f°C", black_temp);
+          ESP_LOGD("grill", "Black Probe: %.1f°C", black_temp);
+          
+          // Software alarm: check if temp >= target (when target is set)
+          int black_target = id(black_preset_value);
+          if (black_target > 0 && black_temp >= black_target) {
+            if (!id(black_probe_alarm).state) {
+              ESP_LOGW("grill", "BLACK PROBE ALARM - Target %.0f°C reached!", (float)black_target);
+            }
+            id(black_probe_alarm).publish_state(true);
+          } else {
+            id(black_probe_alarm).publish_state(false);
+          }
         } else {
           id(black_probe_temp).publish_state(NAN);
+          id(black_probe_alarm).publish_state(false);
+          ESP_LOGD("grill", "Black Probe: Disconnected");
         }
         
         // White probe temperature (bytes 4-5, big-endian)
         uint16_t white_raw = (x[4] << 8) | x[5];
-        if (white_raw != 0xFFFF) {
+        bool white_connected = (white_raw != 0xFFFF);
+        id(white_probe_connected).publish_state(white_connected);
+        if (white_connected) {
           float white_temp = white_raw / 10.0;
           id(white_probe_temp).publish_state(white_temp);
-          ESP_LOGI("grill", "White Probe: %.1f°C", white_temp);
+          ESP_LOGD("grill", "White Probe: %.1f°C", white_temp);
+          
+          // Software alarm: check if temp >= target (when target is set)
+          int white_target = id(white_preset_value);
+          if (white_target > 0 && white_temp >= white_target) {
+            if (!id(white_probe_alarm).state) {
+              ESP_LOGW("grill", "WHITE PROBE ALARM - Target %.0f°C reached!", (float)white_target);
+            }
+            id(white_probe_alarm).publish_state(true);
+          } else {
+            id(white_probe_alarm).publish_state(false);
+          }
         } else {
           id(white_probe_temp).publish_state(NAN);
+          id(white_probe_alarm).publish_state(false);
+          ESP_LOGD("grill", "White Probe: Disconnected");
         }
       }
       return NAN;
