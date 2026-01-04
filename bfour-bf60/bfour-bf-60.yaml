@@ -49,9 +49,23 @@ ble_client:
     on_connect:
       then:
         - lambda: 'ESP_LOGI("grill", "Connected to BFOUR Base Unit");'
+        - binary_sensor.template.publish:
+            id: grill_connection_status
+            state: ON
     on_disconnect:
       then:
         - lambda: 'ESP_LOGW("grill", "Disconnected from BFOUR Base Unit");'
+        - binary_sensor.template.publish:
+            id: grill_connection_status
+            state: OFF
+
+binary_sensor:
+  # BLE Connection Status
+  - platform: template
+    name: "Grill Connected"
+    id: grill_connection_status
+    device_class: connectivity
+    icon: "mdi:bluetooth-connect"
 
 sensor:
   # Main temperature data from FFB2 (NOTIFY characteristic)
