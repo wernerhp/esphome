@@ -65,7 +65,7 @@ safe_mode:
 update:
   - platform: http_request
     name: "Firmware Update"
-    source: https://github.com/wernerhp/esphome/releases/latest/download/centurion-d5-evo-ota.bin
+    source: https://raw.githubusercontent.com/wernerhp/esphome/main/centurion-d5-evo/manifest.json
     update_interval: 6h
 
 dashboard_import:
@@ -334,11 +334,32 @@ sensor:
     icon: mdi:wifi-strength-2
     update_interval: 120s
 
-  # Internal uptime sensor for calculating boot time and readable uptime
+  # Internal uptime sensor for calculating boot time (runs once at startup)
+  - platform: uptime
+    id: uptime_boot_sensor
+    internal: true
+    update_interval: never
+    on_value:
+      then:
+        - if:
+            condition:
+              - lambda: 'return id(last_boot).state.empty() && id(homeassistant_time).now().is_valid();'
+            then:
+              - text_sensor.template.publish:
+                  id: last_boot
+                  state: !lambda |-
+                    auto now = id(homeassistant_time).now();
+                    auto boot_time = now.timestamp - (int)x;
+                    char buffer[20];
+                    struct tm *timeinfo = localtime(&boot_time);
+                    strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", timeinfo);
+                    return std::string(buffer);
+
+  # Uptime sensor for readable uptime (updates every 60s)
   - platform: uptime
     id: uptime_sensor
     internal: true
-    update_interval: 1s
+    update_interval: 60s
     on_value:
       then:
         - text_sensor.template.publish:
@@ -358,24 +379,13 @@ sensor:
               if (minutes > 0) result += std::to_string(minutes) + "m ";
               if (days == 0) result += std::to_string(seconds) + "s";
               return result;
-        - if:
-            condition:
-              # Only set once after boot when time is synced
-              - lambda: 'return id(last_boot).state.empty() && id(homeassistant_time).now().is_valid();'
-            then:
-              - text_sensor.template.publish:
-                  id: last_boot
-                  state: !lambda |-
-                    auto now = id(homeassistant_time).now();
-                    auto boot_time = now.timestamp - (int)x;
-                    char buffer[20];
-                    struct tm *timeinfo = localtime(&boot_time);
-                    strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", timeinfo);
-                    return std::string(buffer);
 
 time:
   - platform: homeassistant
     id: homeassistant_time
+    on_time_sync:
+      then:
+        - component.update: uptime_boot_sensor
 
 esp32_ble_tracker:
   scan_parameters:

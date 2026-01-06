@@ -1,0 +1,12 @@
+{
+  "name": "Centurion D5 Evo",
+  "version": "2.0.1",
+  "builds": [
+    {
+      "chipFamily": "ESP32",
+      "ota": {
+        "path": "https://github.com/wernerhp/esphome/releases/download/centurion-d5-evo-v2.0.1/centurion-d5-evo-ota.bin"
+      }
+    }
+  ]
+}
