@@ -3,7 +3,7 @@ substitutions:
   friendly_name: "Centurion D5 Evo"
   comment: "Control your Centurion D5 Evo gate motor remotely."
   project_name: "wernerhp.esphome_centurion_d5_evo"
-  project_version: "2.0.0"
+  project_version: "2.0.1"
   name_add_mac_suffix: true
 
   relay_1_pin: GPIO32
@@ -41,6 +41,10 @@ esp32:
   board: esp32dev
   framework:
     type: esp-idf
+    sdkconfig_options:
+      # Increase max file descriptors to prevent httpd accept errors
+      CONFIG_LWIP_MAX_SOCKETS: "16"
+      CONFIG_VFS_MAX_COUNT: "16"
 
 # Enable logging
 logger:
@@ -86,6 +90,7 @@ captive_portal:
 
 web_server:
   version: 3
+  local: true  # Reduces memory usage by serving files locally
 
 binary_sensor:
   - platform: gpio
@@ -134,9 +139,9 @@ binary_sensor:
               id(gate).publish_state();
         invalid_cooldown: 0ms
 
-      - timing: # Continuous fast flash = Closing
-          - ON for 125ms to 175ms
-          - OFF for 125ms to 175ms
+      - timing: # Continuous fast flash = Closing (~150ms cycle)
+          - ON for 100ms to 200ms
+          - OFF for 100ms to 200ms
         then:
           - logger.log: "Closing"
           - text_sensor.template.publish:
@@ -145,11 +150,11 @@ binary_sensor:
           - lambda: |-
               id(gate).current_operation = CoverOperation::COVER_OPERATION_CLOSING;
               id(gate).publish_state();
-        invalid_cooldown: 0ms
+        invalid_cooldown: 5s
 
       - timing: # Continuous slow flash = Opening (~300ms cycle)
-          - ON for 275ms to 400ms
-          - OFF for 275ms to 400ms
+          - ON for 250ms to 450ms
+          - OFF for 250ms to 450ms
         then:
           - logger.log: "Opening"
           - text_sensor.template.publish:
@@ -158,43 +163,55 @@ binary_sensor:
           - lambda: |-
               id(gate).current_operation = CoverOperation::COVER_OPERATION_OPENING;
               id(gate).publish_state();
-        invalid_cooldown: 0ms
+        invalid_cooldown: 5s
 
-      - timing: # 1 flash / 2 sec = Pillar light override
-          - ON for 150ms to 275ms
-          - OFF for 1700ms to 1900ms
+      - timing: # 1 flash / 2 sec = Pillar light override (require 2 cycles ~4s)
+          - ON for 150ms to 300ms
+          - OFF for 1600ms to 2000ms
+          - ON for 150ms to 300ms
+          - OFF for 1600ms to 2000ms
         then:
           - logger.log: "Pillar light override"
           - text_sensor.template.publish:
               id: status
               state: "Pillar light override"
-        invalid_cooldown: 100ms
+        invalid_cooldown: 1s
 
-      - timing: # 2 flashes / 2 sec = No mains
-          - ON for 150ms to 275ms
-          - OFF for 150ms to 275ms
-          - ON for 150ms to 275ms
-          - OFF for 1100ms to 1500ms
+      - timing: # 2 flashes / 2 sec = No mains (require 2 cycles ~4s)
+          - ON for 150ms to 300ms
+          - OFF for 150ms to 300ms
+          - ON for 150ms to 300ms
+          - OFF for 1000ms to 1600ms
+          - ON for 150ms to 300ms
+          - OFF for 150ms to 300ms
+          - ON for 150ms to 300ms
+          - OFF for 1000ms to 1600ms
         then:
           - logger.log: "No Mains"
           - text_sensor.template.publish:
               id: status
               state: "No Mains"
-        invalid_cooldown: 100ms
+        invalid_cooldown: 1s
 
-      - timing: # 3 flashes / 2 sec = Battery low
-          - ON for 150ms to 275ms
-          - OFF for 150ms to 275ms
-          - ON for 150ms to 275ms
-          - OFF for 150ms to 275ms
-          - ON for 150ms to 275ms
-          - OFF for 400ms to 1100ms
+      - timing: # 3 flashes / 2 sec = Battery low (require 2 cycles ~4s)
+          - ON for 150ms to 300ms
+          - OFF for 150ms to 300ms
+          - ON for 150ms to 300ms
+          - OFF for 150ms to 300ms
+          - ON for 150ms to 300ms
+          - OFF for 400ms to 1200ms
+          - ON for 150ms to 300ms
+          - OFF for 150ms to 300ms
+          - ON for 150ms to 300ms
+          - OFF for 150ms to 300ms
+          - ON for 150ms to 300ms
+          - OFF for 400ms to 1200ms
         then:
           - logger.log: "Low Battery"
           - text_sensor.template.publish:
               id: status
               state: "Low Battery"
-        invalid_cooldown: 100ms
+        invalid_cooldown: 1s
 
 
 output:
@@ -229,6 +246,10 @@ button:
     duration: 1000ms
     name: "Pedestrian"
     icon: "mdi:walk"
+  - platform: restart
+    name: "Reboot"
+    icon: "mdi:restart"
+    entity_category: config
 
 switch:
   - platform: gpio
@@ -271,6 +292,19 @@ text_sensor:
     icon: mdi:gate
     id: status
     name: "Status"
+  # Last boot time
+  - platform: template
+    name: "Last Boot"
+    id: last_boot
+    icon: "mdi:clock-start"
+    entity_category: diagnostic
+  # Uptime (human readable, disabled by default)
+  - platform: template
+    name: "Uptime"
+    id: uptime_text
+    icon: "mdi:timer-outline"
+    entity_category: diagnostic
+    disabled_by_default: true
   # Installed version
   - platform: template
     name: "Device Version"
@@ -294,19 +328,60 @@ text_sensor:
       icon: mdi:wifi
 
 sensor:
-  # Uptime
-  - platform: uptime
-    name: Uptime Sensor
-    icon: mdi:timer-outline
   # WiFi signal
   - platform: wifi_signal
     name: "WiFi Signal"
     icon: mdi:wifi-strength-2
     update_interval: 120s
 
+  # Internal uptime sensor for calculating boot time and readable uptime
+  - platform: uptime
+    id: uptime_sensor
+    internal: true
+    update_interval: 1s
+    on_value:
+      then:
+        - text_sensor.template.publish:
+            id: uptime_text
+            state: !lambda |-
+              int seconds = (int)x;
+              int days = seconds / 86400;
+              seconds %= 86400;
+              int hours = seconds / 3600;
+              seconds %= 3600;
+              int minutes = seconds / 60;
+              seconds %= 60;
+              
+              std::string result;
+              if (days > 0) result += std::to_string(days) + "d ";
+              if (hours > 0) result += std::to_string(hours) + "h ";
+              if (minutes > 0) result += std::to_string(minutes) + "m ";
+              if (days == 0) result += std::to_string(seconds) + "s";
+              return result;
+        - if:
+            condition:
+              # Only set once after boot when time is synced
+              - lambda: 'return id(last_boot).state.empty() && id(homeassistant_time).now().is_valid();'
+            then:
+              - text_sensor.template.publish:
+                  id: last_boot
+                  state: !lambda |-
+                    auto now = id(homeassistant_time).now();
+                    auto boot_time = now.timestamp - (int)x;
+                    char buffer[20];
+                    struct tm *timeinfo = localtime(&boot_time);
+                    strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", timeinfo);
+                    return std::string(buffer);
+
+time:
+  - platform: homeassistant
+    id: homeassistant_time
+
 esp32_ble_tracker:
   scan_parameters:
     active: true
+    interval: 1100ms  # Reduce scan frequency to free resources
+    window: 1100ms
 
 bluetooth_proxy:
   active: true
