@@ -1,0 +1,836 @@
+substitutions:
+  device_name: TekDesk
+  name: esphome-web-e31833
+  unit_of_measurement: "cm" # display label only; the desk reports cm and no
+                            # conversion is applied, so do not change this to "in"
+                            # (min/max_height and cover math are all in cm)
+  min_height: "60.0"
+  max_height: "125.0"
+  ssid: !secret wifi_ssid
+  wifi_password: !secret wifi_password
+  ap_fallback_password: !secret fallback_password
+  desk_tx_pin: GPIO5   # D1 / black (swapped: ESP TX -> shifter LV1 -> desk RX command line)
+  desk_rx_pin: GPIO4   # D2 / green (swapped: ESP RX <- shifter LV2 <- desk TX data line)
+  keypad_rx_pin: GPIO3 # RX0 (ESP RX <- keypad TX; hardware UART0, console freed via logger baud_rate:0)
+  screen_wake_pin: GPIO14 # D5 (PIN20 -> shifter LV3/HV3 -> desk PIN20 wake line)
+
+# NOTE: the iMicknl loctekmotion_desk_height component was removed. It exclusively
+# consumed the desk RX stream, which blocked reading the 7-segment DISPLAY frames.
+# The custom parser in the interval lambda below now decodes BOTH height and the raw
+# display text off the same 9B 07 12 frames.
+
+esp8266:
+  board: nodemcuv2
+
+globals:
+  - id: last_height_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  - id: kp_state
+    type: uint8_t
+    restore_value: no
+    initial_value: '0'
+  # tx_cmd = command byte to inject; tx_burst = frames remaining (>0 momentary, -1 held, 0 idle).
+  - id: tx_cmd
+    type: uint8_t
+    restore_value: no
+    initial_value: '0'
+  - id: tx_burst
+    type: int
+    restore_value: no
+    initial_value: '0'
+  - id: kp_fb0
+    type: uint8_t
+    restore_value: no
+    initial_value: '0'
+  - id: kp_fb1
+    type: uint8_t
+    restore_value: no
+    initial_value: '0'
+  - id: kp_fb2
+    type: uint8_t
+    restore_value: no
+    initial_value: '0'
+  - id: kp_fb3
+    type: uint8_t
+    restore_value: no
+    initial_value: '0'
+  - id: kp_fb4
+    type: uint8_t
+    restore_value: no
+    initial_value: '0'
+  - id: kp_fb5
+    type: uint8_t
+    restore_value: no
+    initial_value: '0'
+  - id: kp_fb6
+    type: uint8_t
+    restore_value: no
+    initial_value: '0'
+  - id: kp_fb7
+    type: uint8_t
+    restore_value: no
+    initial_value: '0'
+  # Desk RX (display line) parser state: accumulate 9B .. 9D frames from desk_uart.
+  - id: dk_state
+    type: uint8_t
+    restore_value: no
+    initial_value: '0'
+  - id: dk_buf
+    type: uint8_t[10]
+    restore_value: no
+  - id: disp_text
+    type: std::string
+    restore_value: no
+    initial_value: '""'
+  - id: disp_height
+    type: float
+    restore_value: yes
+    initial_value: 'NAN'
+  # Alarm set-sequence state.
+  - id: alarm_target
+    type: int
+    restore_value: yes
+    initial_value: '2'
+  - id: alarm_guard
+    type: int
+    restore_value: no
+    initial_value: '0'
+  # Last clean menu minutes read off the display (no decimal point). Height frames
+  # carry a dp (76.6) so they never clobber this; alarm-menu values (" 10") don't.
+  - id: alarm_cur
+    type: int
+    restore_value: no
+    initial_value: '-1'
+  # Previous menu value, used to wait event-driven for the display to change after a tap.
+  - id: alarm_prev
+    type: int
+    restore_value: no
+    initial_value: '-1'
+  # millis() of the last fresh alarm-menu frame. Motor-lockout gate: the Set Alarm
+  # service may only send Up/Down (0x01/0x02 = MOTOR commands) if a menu frame was
+  # seen within the last ~450ms, so a closed menu can never drive the desk.
+  - id: alarm_menu_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  # millis() of the last frame that actually carried the COLON segment. The colon is
+  # the alarm menu's unique signature (":NN") — preset/height/motion frames never show
+  # it. The manual-sync switch-ON is gated on a fresh colon so a preset move (which
+  # briefly emits colon-less numeric frames) can no longer flip the Alarm on.
+  - id: alarm_colon_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  # true = number is blinking (EDIT mode, value not yet saved); false = colon blinking
+  # (ARMED / saved). Drives the "tap A to save, verify armed" logic.
+  - id: alarm_editing
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  # Previous-frame value of alarm_editing, for falling-edge detection (Edit -> saved).
+  # The manual-keypad sync commits the edited value to HA only on that transition,
+  # so mid-edit tapping never writes to history.
+  - id: alarm_edit_prev
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  # Desk height snapshot at the start of Set Alarm. If height moves during the
+  # adjust loop, we're driving the MOTOR (menu closed) -> abort immediately.
+  - id: alarm_height0
+    type: float
+    restore_value: no
+    initial_value: '0.0'
+  # Committed step direction for the adjust loop (0x01 Up / 0x02 Down), chosen once
+  # by shortest circular distance on the 1..99 ring so wrap-around is handled and we
+  # never oscillate at the 99<->1 boundary.
+  - id: alarm_step_cmd
+    type: uint8_t
+    restore_value: no
+    initial_value: '0x01'
+  # Result of the last set_alarm run (armed value == target). Internal, for logging.
+  - id: alarm_ok
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+
+esphome:
+  name: ${name}
+  friendly_name: ${device_name}
+  comment: Used to control your ${device_name} standing desk via Home Assistant.
+
+  # Wake the display on boot for fresh height frames. Do NOT press Memory here (0x20 = Set, shows "S-").
+  on_boot:
+    priority: -100
+    then:
+      # Republish the restored last-known height immediately so HA shows it instead
+      # of NA before the first live height frame arrives (e.g. if we boot into a menu).
+      - if:
+          condition:
+            lambda: 'return !isnan(id(disp_height));'
+          then:
+            - lambda: 'id(desk_height).publish_state(id(disp_height));'
+      - delay: 10s
+      - button.press: button_wake_screen
+
+# baud_rate: 0 frees GPIO3/RX0 (UART0 console) for the keypad passthrough UART; logs via web_server/OTA.
+logger:
+  baud_rate: 0
+
+# KEYPAD -> DESK FRAME FORWARDER. Every keypad frame received on RX0 is retransmitted
+# verbatim on D1 (desk_uart TX); a virtual button substitutes the <cmd> byte + recomputes
+# CRC so it is byte-identical to a physical press. Keypad supplies all timing/heartbeat;
+# unplug it and the desk goes idle, exactly as stock.
+#
+# Poll at 5ms (not the frame period): keypad frames arrive every ~29ms and take ~8ms
+# to clock in, so a 30ms poll usually caught a frame mid-arrival, completing it only on
+# the NEXT tick -> forwarded cadence ~60ms = 2x too slow -> desk read it as repeated
+# press/release and stuttered. 5ms polling completes each frame within one arrival, so
+# output tracks the native ~29ms rate. Loop is trivial + non-blocking (WDT-safe).
+interval:
+  - interval: 5ms
+    then:
+      - lambda: |-
+          // Bound each drain so one 5ms tick can never busy-loop the WDT into a reset.
+          // Two preset moves + alarm-on flood both UARTs continuously; an unbounded
+          // `while (available()>0)` then runs a single loop iteration for ~1s (measured
+          // loop_time 1015ms) and starves the ESP8266 watchdog. Cap = plenty for the
+          // ~29ms native frame rate at 9600 baud (~1 byte/ms), and any leftover bytes
+          // are drained on the very next tick 5ms later.
+          int kp_budget = 64;
+          while (id(keypad_uart).available() > 0 && kp_budget-- > 0) {
+            uint8_t b;
+            if (!id(keypad_uart).read_byte(&b)) break;
+            if (id(kp_state) == 0) {
+              if (b != 0x9b) continue;
+              id(kp_fb0) = b; id(kp_state) = 1; continue;
+            }
+            switch (id(kp_state)) {
+              case 1: id(kp_fb1) = b; break;
+              case 2: id(kp_fb2) = b; break;
+              case 3: id(kp_fb3) = b; break;
+              case 4: id(kp_fb4) = b; break;
+              case 5: id(kp_fb5) = b; break;
+              case 6: id(kp_fb6) = b; break;
+              case 7: id(kp_fb7) = b; break;
+            }
+            id(kp_state)++;
+            if (id(kp_state) < 8) continue;
+            id(kp_state) = 0;
+
+            if (id(kp_fb0) != 0x9b || id(kp_fb7) != 0x9d) continue;
+
+            uint8_t out_cmd = id(kp_fb3);
+            bool substituting = false;
+            if (id(tx_burst) != 0) {
+              out_cmd = id(tx_cmd);
+              substituting = true;
+            }
+
+            uint8_t frame[8];
+            if (!substituting) {
+              frame[0]=id(kp_fb0); frame[1]=id(kp_fb1); frame[2]=id(kp_fb2);
+              frame[3]=id(kp_fb3); frame[4]=id(kp_fb4); frame[5]=id(kp_fb5);
+              frame[6]=id(kp_fb6); frame[7]=id(kp_fb7);
+            } else {
+              // Rebuild frame with substituted cmd + fresh CRC16/MODBUS.
+              uint8_t payload[4] = {0x06, 0x02, out_cmd, 0x00};
+              uint16_t crc = 0xFFFF;
+              for (int i = 0; i < 4; i++) {
+                crc ^= payload[i];
+                for (int k = 0; k < 8; k++)
+                  crc = (crc & 1) ? (crc >> 1) ^ 0xA001 : (crc >> 1);
+              }
+              frame[0]=0x9b; frame[1]=0x06; frame[2]=0x02; frame[3]=out_cmd;
+              frame[4]=0x00; frame[5]=(crc>>8)&0xFF; frame[6]=crc&0xFF; frame[7]=0x9d;
+              if (id(tx_burst) > 0) {
+                id(tx_burst)--;
+                if (id(tx_burst) == 0) id(tx_cmd) = 0x00;
+              }
+            }
+            id(desk_uart).write_array(frame, 8);
+          }
+          // --- DESK RX: parse 9B .. 9D display frames for height + raw display text ---
+          int dk_budget = 64;   // same per-tick cap as the keypad drain (WDT safety)
+          while (id(desk_uart).available() > 0 && dk_budget-- > 0) {
+            uint8_t b;
+            if (!id(desk_uart).read_byte(&b)) break;
+            if (id(dk_state) == 0) {
+              if (b != 0x9b) continue;
+              id(dk_buf)[0] = b; id(dk_state) = 1; continue;
+            }
+            if (id(dk_state) < 10) { id(dk_buf)[id(dk_state)] = b; id(dk_state)++; }
+            else { id(dk_state) = 0; continue; }
+            if (b != 0x9d) continue;           // wait for terminator
+            uint8_t n = id(dk_state);
+            id(dk_state) = 0;
+            // Height/display frame: 9B 07 12 d1 d2 d3 ck ck 9D (n==9)
+            if (n == 9 && id(dk_buf)[1] == 0x07) {
+              // Standard 7-seg bit layout: a=0x01 b=0x02 c=0x04 d=0x08 e=0x10
+              // f=0x20 g=0x40 dp=0x80. All glyphs derived from segment geometry
+              // (digits 0-9 verified against live captures; letters follow the same
+              // canonical font). Ambiguous shared shapes: S==5 (0x6D), I==1 (0x06),
+              // o and 0 differ (o=0x5C lower loop, 0=0x3F full).
+              auto seg = [](uint8_t s) -> char {
+                switch (s & 0x7f) {
+                  // digits
+                  case 0x3F: return '0'; case 0x06: return '1'; case 0x5B: return '2';
+                  case 0x4F: return '3'; case 0x66: return '4'; case 0x6D: return '5';
+                  case 0x7D: return '6'; case 0x07: return '7'; case 0x7F: return '8';
+                  case 0x6F: return '9';
+                  // blanks / separators
+                  case 0x00: return ' '; case 0x40: return '-'; case 0x08: return '_';
+                  case 0x09: return ':';   // colon separator (alarm menu ":02")
+                  // upper-case letters
+                  case 0x77: return 'A'; case 0x39: return 'C'; case 0x79: return 'E';
+                  case 0x71: return 'F'; case 0x3D: return 'G'; case 0x76: return 'H';
+                  case 0x1E: return 'J'; case 0x38: return 'L'; case 0x73: return 'P';
+                  case 0x3E: return 'U'; case 0x6E: return 'y';
+                  // lower-case / unique shapes
+                  case 0x7C: return 'b'; case 0x58: return 'c'; case 0x5E: return 'd';
+                  case 0x74: return 'h'; case 0x54: return 'n'; case 0x5C: return 'o';
+                  case 0x50: return 'r'; case 0x78: return 't'; case 0x1C: return 'u';
+                  case 0x31: return 'v';   // was mislabelled 'r'; 0x31 is a v/υ shape
+                  default:   return '?';
+                }
+              };
+              char out[8]; uint8_t oi = 0;
+              float digits = 0; int ndig = 0; int dppos = -1; bool numeric = true;
+              int menuval = 0; int menudig = 0; bool menuok = true;  // digits ignoring : and space
+              bool raw_colon = false;   // colon SEGMENT lit this frame (from raw byte, pre-render)
+              for (uint8_t i = 0; i < 3; i++) {
+                uint8_t raw = id(dk_buf)[3 + i];
+                char c = seg(raw);
+                if ((raw & 0x7f) == 0x09) raw_colon = true;   // colon glyph
+                out[oi++] = c;
+                if (raw & 0x80) { out[oi++] = '.'; dppos = ndig; }
+                if (c >= '0' && c <= '9') { digits = digits * 10 + (c - '0'); ndig++;
+                                            menuval = menuval * 10 + (c - '0'); menudig++; }
+                else if (c != ' ') numeric = false;
+                if (c != '0' && c != '1' && c != '2' && c != '3' && c != '4' &&
+                    c != '5' && c != '6' && c != '7' && c != '8' && c != '9' &&
+                    c != ' ' && c != ':') menuok = false;
+              }
+              out[oi] = 0;
+              // S and 5 share the 7-seg byte 0x6D. Disambiguate by context: if the
+              // frame contains any alphabetic glyph (a status word like "ASr", "S-"),
+              // treat every '5' in it as 'S'. Pure-numeric frames keep '5' as the digit.
+              bool has_alpha = false;
+              for (uint8_t i = 0; out[i]; i++) {
+                char c = out[i];
+                if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) { has_alpha = true; break; }
+              }
+              if (out[1] == '-' ) has_alpha = true;   // "S-" Set prompt (dash, no other letter)
+              if (has_alpha) {
+                for (uint8_t i = 0; out[i]; i++) if (out[i] == '5') out[i] = 'S';
+              }
+              // Compare/assign directly against the char buffer: std::string vs
+              // const char* needs no temporary, so the hot parser path (a frame every
+              // ~29ms) makes no heap allocation and can't fragment the ESP8266 heap.
+              if (id(disp_text) != out) {
+                id(disp_text) = out;
+                id(display_text_sensor).publish_state(id(disp_text));
+              }
+              // Height = numeric reading. Below 100cm the 3-cell 7-seg shows "NN.N"
+              // (decimal after cell 2, dppos==1). At 100cm+ there's no cell left for
+              // the decimal so the desk shows whole centimeters "NNN" with NO decimal
+              // point — accept that as an integer height, else the sensor sticks at
+              // 99.7 while the display correctly reads 100+. A colon-bearing frame is
+              // the alarm menu, never a height, so exclude raw_colon.
+              // Menu values (":05","0FF") go to the text sensor only.
+              if (numeric && ndig >= 2 && dppos == 1) {
+                float h = digits / 10.0f;          // NN.N  (below 100cm)
+                if (h != id(disp_height)) {
+                  id(disp_height) = h;
+                  id(desk_height).publish_state(h);
+                }
+              } else if (numeric && ndig == 3 && dppos < 0 && !raw_colon) {
+                float h = digits;                  // NNN whole cm (100cm and up)
+                if (h != id(disp_height)) {
+                  id(disp_height) = h;
+                  id(desk_height).publish_state(h);
+                }
+              }
+              // Alarm menu minutes: any frame whose glyphs are only digits, spaces
+              // or a colon (e.g. ":05", " 05", "0:5"). Height frames carry a decimal
+              // point so they never reach here (menuok stays true but we require the
+              // frame to NOT be a height reading via dppos<0).
+              if (menuok && menudig >= 1 && dppos < 0) {
+                id(alarm_cur) = menuval;
+                id(alarm_menu_ms) = millis();   // fresh menu echo seen (motor-lockout gate)
+                if (raw_colon) id(alarm_colon_ms) = millis();  // true alarm-menu signature
+              }
+              // Track blink phase to tell EDIT mode (number blinks: ":NN" <-> ":  ")
+              // from ARMED (colon blinks: ":NN" <-> " NN"). raw_colon is the colon
+              // SEGMENT straight off the byte (independent of glyph rendering).
+              if (menuok && dppos < 0) {
+                bool has_digit = false;
+                for (uint8_t i = 0; out[i]; i++) {
+                  if (out[i] >= '0' && out[i] <= '9') has_digit = true;
+                }
+                // digits-off-while-colon-on frame => number is blinking => EDIT mode
+                if (raw_colon && !has_digit) id(alarm_editing) = true;
+                // colon-off-while-digits-on frame => colon is blinking => ARMED
+                if (!raw_colon && has_digit) id(alarm_editing) = false;
+              }
+              // ── MANUAL-KEYPAD SYNC ──────────────────────────────────────────
+              // When NO script is driving the desk (alarm_guard == 0), reflect the
+              // physical keypad into HA WITHOUT firing any commands:
+              //   - Alarm Timer field  <- the edited value, committed ONCE when Edit
+              //     mode ends (A pressed, or the menu times out and the number stops
+              //     blinking). Not updated live, so HA history records only the saved
+              //     value, not every intermediate tap.
+              //   - Alarm switch state <- the On/Off shown on the screen: any live
+              //     alarm menu frame => On; "0FF"/"OFF" => Off.
+              if (id(alarm_guard) == 0) {
+                bool in_alarm_menu = (millis() - id(alarm_colon_ms)) < 1000;
+                // Falling edge of alarm_editing (Edit -> saved) commits the value, but
+                // only while genuinely in the alarm menu (fresh colon), so a preset
+                // move's colon-less digit frames can't spuriously commit a stale value.
+                if (in_alarm_menu && id(alarm_edit_prev) && !id(alarm_editing) &&
+                    id(alarm_cur) >= 1 && id(number_alarm_timer).state != id(alarm_cur)) {
+                  id(alarm_target) = id(alarm_cur);
+                  id(number_alarm_timer).publish_state(id(alarm_cur));
+                }
+                // Switch tracks the On/Off shown on screen (strstr on the char buffer,
+                // no std::string temporary).
+                bool off_shown = strstr(out, "0FF") != nullptr ||
+                                 strstr(out, "OFF") != nullptr;
+                // Preset moves emit colon-less numeric frames, so in_alarm_menu stays
+                // stale and can no longer flip the Alarm on mid-move.
+                if (off_shown) {
+                  if (id(switch_alarm).state) id(switch_alarm).publish_state(false);
+                } else if (in_alarm_menu && menuok && dppos < 0 && id(alarm_cur) >= 1) {
+                  if (!id(switch_alarm).state) id(switch_alarm).publish_state(true);
+                }
+              }
+              id(alarm_edit_prev) = id(alarm_editing);
+            }
+          }
+
+# Enable Home Assistant API. Plaintext (no encryption key) — the device is on the
+# trusted LAN. To harden, add an `api_encryption_key` secret and set:
+#   api:
+#     encryption:
+#       key: !secret api_encryption_key
+# then re-add the device in HA with that key.
+api:
+
+ota:
+  platform: esphome
+
+wifi:
+  ssid: ${ssid}
+  password: ${wifi_password}
+
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+    ssid: ${device_name} Fallback Hotspot
+    password: ${ap_fallback_password}
+
+captive_portal:
+
+web_server:
+
+# Temporary: logs the reset reason on every boot + periodic device info.
+# Lets us read WHY the ESP reset after preset->preset->alarm (WDT vs exception vs heap).
+debug:
+  update_interval: 30s
+
+uart:
+  - id: desk_uart
+    baud_rate: 9600
+    tx_pin: ${desk_tx_pin}
+    rx_pin: ${desk_rx_pin}
+    # No RX debug tap: high-frequency RX logging during motion starves the ESP8266 WDT.
+
+  # KEYPAD passthrough UART: keypad command-out wire rerouted to GPIO3/RX0 (hardware
+  # UART0 FIFO, not bit-banged, to avoid WDT crashes). Receive-only.
+  - id: keypad_uart
+    baud_rate: 9600
+    rx_pin: ${keypad_rx_pin}  # RX0, hardware UART0 (console freed via logger baud_rate:0)
+
+sensor:
+  - platform: wifi_signal
+    name: "WiFi signal"
+    update_interval: 60s
+
+  - platform: uptime
+    name: Uptime
+
+  # Temporary crash diagnostics (remove once the preset->preset->alarm reset is solved).
+  # free_heap + fragmentation catch heap exhaustion; loop_time catches WDT starvation.
+  - platform: debug
+    free:
+      name: "Heap Free"
+    fragmentation:
+      name: "Heap Fragmentation"
+    block:
+      name: "Heap Max Block"
+    loop_time:
+      name: "Loop Time"
+
+  - platform: template
+    id: "desk_height"
+    name: Height
+    icon: mdi:arrow-up-down
+    unit_of_measurement: ${unit_of_measurement}
+    accuracy_decimals: 1
+    # round to 0.1 cm so the restored-across-reboot value is clean (float32 can't
+    # represent e.g. 72.4 exactly -> 72.4000015 without this).
+    filters:
+      - round: 1
+    # Value published by the desk-RX parser in the interval lambda (7-seg height frames).
+    update_interval: never
+    on_value_range:
+    - below: ${min_height}
+      then:
+        - switch.turn_off: switch_down
+        - button.press: button_wake_screen
+    - above: ${max_height}
+      then:
+        - switch.turn_off: switch_up
+        - button.press: button_wake_screen
+    on_value:
+      then:
+        - lambda: 'id(last_height_ms) = millis();'
+        - cover.template.publish:
+            id: desk_cover
+            position: !lambda |-
+                // The sensor outputs values from min_height (cm) to max_height (cm)
+                // We need to translate this to 0 - 1 scale.
+                float position = (float(x) - float(${min_height})) / (float(${max_height}) - float(${min_height}));
+                return position;
+
+text_sensor:
+  # Temporary crash diagnostics: reset reason on every boot (WDT / exception / etc).
+  - platform: debug
+    reset_reason:
+      name: "Reset Reason"
+  # Live mirror of the desk's 7-segment display: height (76.6), alarm menu (" 10"),
+  # "0FF", "S-" (Set), etc. Decoded from the 9B 07 12 frames by the desk-RX parser.
+  - platform: template
+    name: "Display"
+    id: display_text_sensor
+    icon: mdi:clock-digital
+    entity_category: "diagnostic"
+    disabled_by_default: true
+    update_interval: never
+
+script:
+  # ── set_alarm ────────────────────────────────────────────────────────────────
+  # Arm the alarm to alarm_target. Enter the menu, step to the target by the fewest
+  # taps (shortest path on the circular 1..99 ring, wrap-aware), save with A, then
+  # verify the armed (colon-blink) value == target.
+  #
+  # SAFETY: Up/Down (0x01/0x02) are the desk's MOTOR commands; they only act as menu
+  # nav while the number is blinking (EDIT mode). Every tap is gated on
+  # alarm_editing==true AND the desk height being unchanged, so a closed or
+  # running-timer menu can never drive the desk. The number stops blinking the instant
+  # the menu closes, which ends the loop before any motor command can escape.
+  - id: set_alarm
+    mode: single
+    then:
+      - lambda: |-
+          id(alarm_ok) = false;
+          id(alarm_guard) = 1;
+          id(alarm_cur) = -1;
+          id(alarm_menu_ms) = 0;
+          id(alarm_editing) = false;
+          id(alarm_height0) = id(disp_height);
+      - switch.turn_on: screen_switch
+      - delay: 250ms
+      # Enter set-mode with a SHORT 0x40 tap (a long hold is the OFF command!).
+      - lambda: 'id(tx_cmd) = 0x40; id(tx_burst) = 6;'
+      # Wait until we are provably in EDIT mode (the number is blinking). This is the
+      # ONLY safe precondition for sending Up/Down; a running/closed timer never sets it.
+      - wait_until:
+          condition:
+            lambda: 'return id(alarm_cur) >= 0 && id(alarm_editing);'
+          timeout: 6s
+      - if:
+          condition:
+            lambda: 'return id(alarm_cur) >= 0 && id(alarm_editing) && (millis() - id(alarm_menu_ms)) < 700;'
+          then:
+            # Choose the step direction ONCE by shortest circular distance on 1..99.
+            # up-distance = (target - cur) mod 99; down-distance = (cur - target) mod 99.
+            - lambda: |-
+                int span = 99;                 // ring size: values 1..99
+                int cur = id(alarm_cur), tgt = id(alarm_target);
+                int up = ((tgt - cur) % span + span) % span;
+                int down = ((cur - tgt) % span + span) % span;
+                id(alarm_step_cmd) = (up <= down) ? 0x01 : 0x02;
+            - repeat:
+                count: 60
+                then:
+                  - if:
+                      condition:
+                        lambda: |-
+                          return id(alarm_guard) == 1
+                              && id(alarm_cur) != id(alarm_target)
+                              && id(alarm_cur) >= 0
+                              && id(alarm_editing)                                   // still EDIT mode
+                              && (millis() - id(alarm_menu_ms)) < 450                // menu still echoing
+                              && fabsf(id(disp_height) - id(alarm_height0)) < 0.3f;  // desk hasn't moved
+                      then:
+                        - lambda: |-
+                            id(alarm_prev) = id(alarm_cur);
+                            id(tx_cmd) = id(alarm_step_cmd);
+                            id(tx_burst) = 5;
+                        - wait_until:
+                            condition:
+                              lambda: 'return id(alarm_cur) != id(alarm_prev);'
+                            timeout: 900ms
+                      else:
+                        - lambda: 'id(alarm_guard) = 2;'
+            # Save by STATE: on target and still editing -> tap A, verify armed (colon-blink).
+            - if:
+                condition:
+                  lambda: |-
+                    return id(alarm_cur) == id(alarm_target)
+                        && id(alarm_editing)
+                        && (millis() - id(alarm_menu_ms)) < 450
+                        && fabsf(id(disp_height) - id(alarm_height0)) < 0.3f;
+                then:
+                  - lambda: |-
+                      id(tx_cmd) = 0x40; id(tx_burst) = 6;
+                  - wait_until:
+                      condition:
+                        lambda: 'return id(alarm_editing) == false;'
+                      timeout: 2s
+                  # Confirm the armed value equals the target: give the armed display
+                  # a couple of frames to settle, then compare.
+                  - delay: 400ms
+                  - lambda: |-
+                      id(alarm_ok) = (id(alarm_cur) == id(alarm_target));
+                  - if:
+                      condition:
+                        lambda: 'return id(alarm_ok);'
+                      then:
+                        - logger.log:
+                            format: "set_alarm SAVED OK: armed=%d target=%d"
+                            args: ['id(alarm_cur)', 'id(alarm_target)']
+                      else:
+                        - logger.log:
+                            level: WARN
+                            format: "set_alarm MISMATCH: armed=%d target=%d (will retry)"
+                            args: ['id(alarm_cur)', 'id(alarm_target)']
+                else:
+                  - lambda: 'id(alarm_ok) = false;'
+                  - logger.log:
+                      format: "set_alarm ABORT (not on target/edit lost): cur=%d target=%d"
+                      args: ['id(alarm_cur)', 'id(alarm_target)']
+          else:
+            - lambda: 'id(alarm_ok) = false;'
+            - logger.log:
+                format: "set_alarm ABORT: never entered EDIT mode (no motor cmd sent)"
+      - delay: 150ms
+      - lambda: 'id(alarm_guard) = 0;'
+
+  # ── alarm_off ────────────────────────────────────────────────────────────────
+  # Turn the alarm off. A long 0x40 hold is the desk's OFF command; the fixed-burst
+  # hold (matching the working "Alarm Hold") reliably reaches 0FF. Stops when the
+  # display reads OFF or after the burst completes.
+  - id: alarm_off
+    mode: single
+    then:
+      - switch.turn_on: screen_switch
+      - delay: 250ms
+      - lambda: 'id(tx_cmd) = 0x40; id(tx_burst) = 140;'   # ~4s hold = OFF (same as Alarm Hold)
+      - wait_until:
+          condition:
+            lambda: |-
+              const std::string &t = id(disp_text);   // reference, no per-poll copy
+              return t.find("0FF") != std::string::npos ||
+                     t.find("OFF") != std::string::npos ||
+                     t.find("0F")  != std::string::npos;
+          timeout: 5s
+      - lambda: 'id(tx_cmd) = 0x00; id(tx_burst) = 0;'
+      - logger.log: 'alarm_off done'
+
+number:
+  # Alarm countdown target in minutes. Persisted; defaults to 2. When the switch is
+  # toggled on, set_alarm arms the desk to this value; while the desk is manually
+  # edited on the keypad, this field mirrors the live displayed value.
+  - platform: template
+    name: "Alarm Timer"
+    id: number_alarm_timer
+    unit_of_measurement: "min"
+    icon: mdi:timer-cog
+    entity_category: "config"
+    optimistic: true
+    restore_value: true
+    initial_value: "2"
+    min_value: 1
+    max_value: 99
+    step: 1
+    mode: box
+    set_action:
+      - lambda: 'id(alarm_target) = (int) x;'
+
+switch:
+  # ── Alarm toggle ─────────────────────────────────────────────────────────────
+  # ON  -> set_alarm: arm the sit/stand reminder to "Alarm Timer" minutes.
+  # OFF -> alarm_off: long-hold 0x40 (the desk's off sequence).
+  # optimistic so HA reflects intent immediately; the parser re-syncs this switch to
+  # the desk's actual on/off display, and to manual keypad operation.
+  - platform: template
+    name: "Alarm"
+    id: switch_alarm
+    icon: mdi:alpha-a-box
+    optimistic: true
+    # ALWAYS_OFF (not RESTORE_*): a stuck-on alarm must NOT restore ON and re-run
+    # set_alarm on every boot — that arming re-entry stalls and resets the ESP,
+    # restoring ON again = boot-loop. Alarm is momentary intent, re-armed on demand.
+    restore_mode: ALWAYS_OFF
+    turn_on_action:
+      - script.execute: set_alarm
+    turn_off_action:
+      - script.execute: alarm_off
+
+  - platform: gpio
+    name: "Virtual screen" # PIN20 wake line
+    id: screen_switch
+    pin:
+      number: ${screen_wake_pin}
+      mode: OUTPUT
+    restore_mode: ALWAYS_OFF
+    entity_category: "config"
+    internal: true
+
+  - platform: template
+    name: "Up"
+    id: switch_up
+    icon: mdi:arrow-up-bold
+    optimistic: true
+    internal: true
+    turn_on_action:
+      - switch.turn_off: switch_down
+      - switch.turn_on: screen_switch
+      - lambda: |-
+          id(tx_cmd) = 0x01;
+          id(tx_burst) = -1;
+    turn_off_action:
+      - lambda: |-
+          id(tx_cmd) = 0x00;
+          id(tx_burst) = 0;
+      - switch.turn_off: screen_switch
+
+  - platform: template
+    name: "Down"
+    id: switch_down
+    icon: mdi:arrow-down-bold
+    optimistic: true
+    internal: true
+    turn_on_action:
+      - switch.turn_off: switch_up
+      - switch.turn_on: screen_switch
+      - lambda: |-
+          id(tx_cmd) = 0x02;
+          id(tx_burst) = -1;
+    turn_off_action:
+      - lambda: |-
+          id(tx_cmd) = 0x00;
+          id(tx_burst) = 0;
+      - switch.turn_off: screen_switch
+
+button:
+  # ── VERIFIED COMMAND-BYTE MAP (logic-analyser capture, 2026-08-17) ────────────
+  #   frame = 9B 06 02 <cmd> 00 <crc_hi> <crc_lo> 9D  (CRC16/MODBUS over 06 02 cmd 00)
+  #   0x00 idle/heartbeat   0x01 Up (hold)      0x02 Down (hold)
+  #   0x04 Preset 1         0x08 Preset 2       0x10 Preset 3
+  #   0x20 Memory/Set        0x40 Alarm (toggle; on/off share this byte)
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Presets: wake the screen then inject the command byte for ~10 frames (no settle
+  # delay, matching Up/Down); the forwarder keeps the desk awake so it responds at once.
+  - platform: template
+    name: "Preset 1"
+    id: button_preset1
+    icon: mdi:numeric-1-box
+    on_press:
+      - switch.turn_on: screen_switch
+      - lambda: 'id(tx_cmd) = 0x04; id(tx_burst) = 10;'
+
+  - platform: template
+    name: "Preset 2"
+    id: button_preset2
+    icon: mdi:numeric-2-box
+    on_press:
+      - switch.turn_on: screen_switch
+      - lambda: 'id(tx_cmd) = 0x08; id(tx_burst) = 10;'
+
+  - platform: template
+    name: "Preset 3"
+    id: button_preset3
+    icon: mdi:numeric-3-box
+    on_press:
+      - switch.turn_on: screen_switch
+      - lambda: 'id(tx_cmd) = 0x10; id(tx_burst) = 10;'
+
+  # Memory/Set key (0x20). Programs a preset (press, then a preset button). This is
+  # the desk's Set function, NOT a child lock (the old switch on 0x20 was mislabelled).
+  - platform: template
+    name: "Memory"
+    id: button_m
+    icon: mdi:alpha-m-box
+    entity_category: "config"
+    on_press:
+      - switch.turn_on: screen_switch
+      - delay: 400ms
+      - lambda: 'id(tx_cmd) = 0x20; id(tx_burst) = 10;'
+
+  - platform: template
+    name: "Wake"
+    id: button_wake_screen
+    icon: mdi:gesture-tap-button
+    entity_category: "config"
+    on_press:
+      - switch.turn_on: screen_switch
+      - delay: 1000ms
+      - switch.turn_off: screen_switch
+
+  - platform: restart
+    name: "Restart"
+    entity_category: "config"
+
+cover:
+  - platform: template
+    id: "desk_cover"
+    icon: mdi:desk # or mdi:human-male-height-variant
+    name: "Desk"
+    device_class: blind # makes it easier to integrate with Google/Alexa
+    has_position: true
+    position_action:
+      - if:
+          condition:
+            - lambda: |-
+                return pos > id(desk_cover).position;
+          then:
+            - cover.open: desk_cover
+            - wait_until:
+                lambda: |-
+                  return id(desk_cover).position  >= pos;
+            - cover.stop: desk_cover
+          else:
+            - cover.close: desk_cover
+            - wait_until:
+                lambda: |-
+                  return id(desk_cover).position <= pos;
+            - cover.stop: desk_cover
+    stop_action:
+      - switch.turn_off: switch_up
+      - switch.turn_off: switch_down
+      - button.press: button_wake_screen
+    open_action:
+      - switch.turn_off: switch_down
+      # Hold PIN20 HIGH + short settle, then drive. No wait_until busy-wait (WDT).
+      - switch.turn_on: screen_switch
+      - delay: 400ms
+      - switch.turn_on: switch_up
+    close_action:
+      - switch.turn_off: switch_up
+      - switch.turn_on: screen_switch
+      - delay: 400ms
+      - switch.turn_on: switch_down
+    optimistic: false
