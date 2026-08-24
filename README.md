@@ -1,6 +1,7 @@
 # [ESP Home](https://esphome.io/)
 - [Centurion D5 Evo](https://github.com/wernerhp/esphome/tree/main/centurion-d5-evo)
 - [Garage Door Controller](https://github.com/wernerhp/esphome/tree/main/garage-door)
+- [LoctekMotion Sit-Stand Desk](https://github.com/wernerhp/esphome/tree/main/loctekmotion-desk)
 
 # [LibreTiny](https://docs.libretiny.eu/)
 - [CBI Astute Smart Controller (ASC)](https://github.com/wernerhp/esphome/tree/main/cbi-astute-smart-controller)
