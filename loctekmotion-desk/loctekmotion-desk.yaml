@@ -84,10 +84,58 @@ globals:
     type: std::string
     restore_value: no
     initial_value: '""'
+  - id: status_frame
+    type: std::string
+    restore_value: no
+    initial_value: '""'
   - id: disp_height
     type: float
     restore_value: yes
     initial_value: 'NAN'
+  # Desk lock: when true, the forwarder writes NOTHING to the desk (every keypad press
+  # and ESP-injected command is dropped). Toggled by holding Preset 1+2+3 (0x1C) 2s, or
+  # the "Desk Lock" switch. restore_value so a locked desk stays locked across reboots.
+  - id: desk_locked
+    type: bool
+    restore_value: yes
+    initial_value: 'false'
+  # Lock-combo hold tracking (0x1C held 2s). _ms = millis() at hold start (0 = not held);
+  # _latched = toggle fired for this hold (prevents repeat-toggle while still held).
+  - id: lock_combo_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  - id: lock_combo_last
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  - id: lock_combo_latched
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  # Keypad Command debounce: only publish a command byte once it has been stable for
+  # ~60ms (~2 frames), so transient intermediate combos as fingers land (e.g. 0x04/0x0C
+  # on the way to 0x1C for 1+2+3) don't false-fire automations. _cand = the byte we're
+  # waiting to settle, _cand_ms = when it first appeared, _pub = last value published.
+  - id: cmd_cand
+    type: uint8_t
+    restore_value: no
+    initial_value: '0'
+  - id: cmd_cand_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  - id: cmd_pub
+    type: uint8_t
+    restore_value: no
+    initial_value: '0'
+  # Cover motion tracking: last height-change timestamp (ms) so the interval loop can
+  # reset the cover to IDLE once movement stops, regardless of what caused the move
+  # (keypad, preset, or ESP cover command).
+  - id: motion_last_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
   # Alarm set-sequence state.
   - id: alarm_target
     type: int
@@ -171,6 +219,9 @@ esphome:
             lambda: 'return !isnan(id(disp_height));'
           then:
             - lambda: 'id(desk_height).publish_state(id(disp_height));'
+      # Re-sync the Desk Lock switch to the restored desk_locked global (the global is the
+      # source of truth; the switch's own restore may disagree after a lock-then-reboot).
+      - lambda: 'id(switch_desk_lock).publish_state(id(desk_locked));'
       - delay: 10s
       - button.press: button_wake_screen
 
@@ -192,6 +243,15 @@ interval:
   - interval: 5ms
     then:
       - lambda: |-
+          // Cover motion auto-idle: the desk emits no "stopped" signal, so if the cover
+          // is showing OPENING/CLOSING but the height has been unchanged for ~700ms, the
+          // move has ended — return the cover to IDLE. Covers any motion source (keypad,
+          // preset, or ESP cover command).
+          if (id(desk_cover).current_operation != cover::COVER_OPERATION_IDLE &&
+              (millis() - id(motion_last_ms)) > 700) {
+            id(desk_cover).current_operation = cover::COVER_OPERATION_IDLE;
+            id(desk_cover).publish_state();
+          }
           // Bound each drain so one 5ms tick can never busy-loop the WDT into a reset.
           // Two preset moves + alarm-on flood both UARTs continuously; an unbounded
           // `while (available()>0)` then runs a single loop iteration for ~1s (measured
@@ -221,11 +281,98 @@ interval:
 
             if (id(kp_fb0) != 0x9b || id(kp_fb7) != 0x9d) continue;
 
+            // Physical keypad OVERRIDES an active ESP up/down (or any injected command):
+            // the instant a real key is pressed (kp_fb3 != 0x00) while we're injecting,
+            // cancel the injection so the keypad takes control immediately — no need to
+            // press Stop in ESP/HA first. Also drop the cover's up/down switches so HA
+            // reflects that the ESP move ended. (The lock gesture 0x1C is a real key too,
+            // so it naturally cancels an injected move, which is the desired behaviour.)
+            if (id(tx_burst) != 0 && id(kp_fb3) != 0x00) {
+              id(tx_cmd) = 0x00;
+              id(tx_burst) = 0;
+              id(switch_up).publish_state(false);
+              id(switch_down).publish_state(false);
+            }
+
             uint8_t out_cmd = id(kp_fb3);
             bool substituting = false;
             if (id(tx_burst) != 0) {
               out_cmd = id(tx_cmd);
               substituting = true;
+            }
+            // Keypad Command tap (DEBOUNCED): publish a readable label for the command
+            // byte, but only after it has been stable for ~60ms, so transient intermediate
+            // combos as fingers land (0x04/0x0C on the way to 0x1C for 1+2+3) don't
+            // false-fire automations. Resets to "none" on the settled idle heartbeat, so HA
+            // sees clean none -> <key> -> none transitions. Read-only tap; sends nothing new
+            // to the desk. out_cmd = physical byte, or tx_cmd when a script is substituting.
+            {
+              uint32_t now = millis();
+              // Track how long the current byte has been present unchanged.
+              if (out_cmd != id(cmd_cand)) {
+                id(cmd_cand) = out_cmd;
+                id(cmd_cand_ms) = now;
+              }
+              // Publish only once the candidate has settled AND differs from what's shown.
+              if (out_cmd != id(cmd_pub) && (now - id(cmd_cand_ms)) >= 60) {
+                id(cmd_pub) = out_cmd;
+                const char* label;
+                switch (out_cmd) {
+                  case 0x00: label = "none";           break;
+                  case 0x01: label = "Up (0x01)";      break;
+                  case 0x02: label = "Down (0x02)";    break;
+                  case 0x04: label = "Preset 1 (0x04)"; break;
+                  case 0x08: label = "Preset 2 (0x08)"; break;
+                  case 0x10: label = "Preset 3 (0x10)"; break;
+                  case 0x20: label = "Memory (0x20)";  break;
+                  case 0x40: label = "Alarm (0x40)";   break;
+                  // Desk-ignored free combos, usable as HA triggers:
+                  case 0x0C: label = "Preset 1+2 (0x0C)"; break;
+                  case 0x18: label = "Preset 2+3 (0x18)"; break;
+                  case 0x14: label = "Preset 1+3 (0x14)"; break;
+                  // Other documented multi-key combos (bitmask ORs):
+                  case 0x05: label = "Preset 1+Up (0x05)"; break;
+                  case 0x24: label = "Memory+Preset 1 (0x24)"; break;
+                  case 0x28: label = "Memory+Preset 2 (0x28)"; break;
+                  case 0x30: label = "Memory+Preset 3 (0x30)"; break;
+                  case 0x03: label = "Up+Down (0x03)"; break;
+                  case 0x41: label = "Alarm+Up (0x41)"; break;
+                  case 0x60: label = "Alarm+Memory (0x60)"; break;
+                  case 0x61: label = "Alarm+Memory+Up (0x61)"; break;
+                  default:   label = nullptr;           break; // unmapped -> hex fallback
+                }
+                if (label != nullptr) {
+                  id(keypad_cmd_sensor).publish_state(label);
+                } else {
+                  char hb[16];
+                  snprintf(hb, sizeof(hb), "0x%02X", out_cmd);
+                  id(keypad_cmd_sensor).publish_state(hb);
+                }
+              }
+            }
+
+            // --- Lock toggle: hold Preset 1+2+3 (0x1C) for 2s ---
+            // Track only PHYSICAL presses (the gesture is a keypad hold, never injected).
+            // The keypad interleaves 0x00 heartbeats even during a solid hold, so measure
+            // an UNINTERRUPTED presence of 0x1C: keep the hold alive across brief non-0x1C
+            // frames (<250ms gap), reset it only after a real release gap. Fire once per
+            // hold (latched), toggling desk_locked + the Desk Lock switch.
+            if (!substituting) {
+              uint32_t now = millis();
+              if (id(kp_fb3) == 0x1C) {
+                if (id(lock_combo_ms) == 0) { id(lock_combo_ms) = now; id(lock_combo_latched) = false; }
+                id(lock_combo_last) = now;
+                if (!id(lock_combo_latched) && (now - id(lock_combo_ms)) >= 2000) {
+                  id(lock_combo_latched) = true;
+                  bool nl = !id(desk_locked);
+                  id(desk_locked) = nl;
+                  id(switch_desk_lock).publish_state(nl);
+                }
+              } else if (id(lock_combo_ms) != 0 && (now - id(lock_combo_last)) > 250) {
+                // Real release gap — reset the hold.
+                id(lock_combo_ms) = 0;
+                id(lock_combo_latched) = false;
+              }
             }
 
             uint8_t frame[8];
@@ -249,7 +396,21 @@ interval:
                 if (id(tx_burst) == 0) id(tx_cmd) = 0x00;
               }
             }
-            id(desk_uart).write_array(frame, 8);
+            // Desk lock: block all COMMAND frames to the desk, but keep forwarding idle
+            // heartbeats (0x00) so the controller's own display-off timer keeps running
+            // (otherwise the panel stays lit until unlock). Also continuously CLEAR any
+            // injected ESP command while locked, so a held up/down (tx_burst=-1) can't
+            // survive the lock and fire the instant you unlock.
+            if (id(desk_locked)) {
+              id(tx_cmd) = 0x00;
+              id(tx_burst) = 0;
+              // Only a genuine physical idle heartbeat passes through.
+              if (!substituting && id(kp_fb3) == 0x00) {
+                id(desk_uart).write_array(frame, 8);
+              }
+            } else {
+              id(desk_uart).write_array(frame, 8);
+            }
           }
           // --- DESK RX: parse 9B .. 9D display frames for height + raw display text ---
           int dk_budget = 64;   // same per-tick cap as the keypad drain (WDT safety)
@@ -265,6 +426,19 @@ interval:
             if (b != 0x9d) continue;           // wait for terminator
             uint8_t n = id(dk_state);
             id(dk_state) = 0;
+            // TEMP passive frame tap: publish the raw hex of EVERY inbound frame
+            // (status 0x11/0x13/0x15 AND display 0x12) so we can see the exact bytes
+            // behind ambiguous renders like "012". Read-only; remove after discovery.
+            if (n >= 3) {
+              char hx[40]; uint8_t hi = 0;
+              for (uint8_t i = 0; i < n && hi < 36; i++)
+                hi += snprintf(hx + hi, sizeof(hx) - hi, "%02X ", id(dk_buf)[i]);
+              if (hi > 0) hx[hi - 1] = 0;
+              if (id(status_frame) != hx) {
+                id(status_frame) = hx;
+                id(status_frame_sensor).publish_state(id(status_frame));
+              }
+            }
             // Height/display frame: 9B 07 12 d1 d2 d3 ck ck 9D (n==9)
             if (n == 9 && id(dk_buf)[1] == 0x07) {
               // Standard 7-seg bit layout: a=0x01 b=0x02 c=0x04 d=0x08 e=0x10
@@ -331,6 +505,17 @@ interval:
               if (id(disp_text) != out) {
                 id(disp_text) = out;
                 id(display_text_sensor).publish_state(id(disp_text));
+                // TEMP: atomically publish the raw hex of THIS display frame alongside
+                // its decoded text, so ambiguous renders like "012" are captured with
+                // their exact bytes (no poller sampling race). Read-only; remove after.
+                char dhx[48]; uint8_t dh = 0;
+                for (uint8_t i = 0; i < n && dh < 44; i++)
+                  dh += snprintf(dhx + dh, sizeof(dhx) - dh, "%02X ", id(dk_buf)[i]);
+                if (dh > 0) dhx[dh - 1] = 0;
+                char combo[64];
+                snprintf(combo, sizeof(combo), "%s = %s", out, dhx);
+                id(status_frame) = combo;
+                id(status_frame_sensor).publish_state(id(status_frame));
               }
               // Height = numeric reading. Below 100cm the 3-cell 7-seg shows "NN.N"
               // (decimal after cell 2, dppos==1). At 100cm+ there's no cell left for
@@ -342,12 +527,27 @@ interval:
               if (numeric && ndig >= 2 && dppos == 1) {
                 float h = digits / 10.0f;          // NN.N  (below 100cm)
                 if (h != id(disp_height)) {
+                  // Reflect real motion on the cover: direction of the height change.
+                  if (!isnan(id(disp_height))) {
+                    id(desk_cover).current_operation =
+                      (h > id(disp_height)) ? cover::COVER_OPERATION_OPENING
+                                            : cover::COVER_OPERATION_CLOSING;
+                    id(motion_last_ms) = millis();
+                    id(desk_cover).publish_state();
+                  }
                   id(disp_height) = h;
                   id(desk_height).publish_state(h);
                 }
               } else if (numeric && ndig == 3 && dppos < 0 && !raw_colon) {
                 float h = digits;                  // NNN whole cm (100cm and up)
                 if (h != id(disp_height)) {
+                  if (!isnan(id(disp_height))) {
+                    id(desk_cover).current_operation =
+                      (h > id(disp_height)) ? cover::COVER_OPERATION_OPENING
+                                            : cover::COVER_OPERATION_CLOSING;
+                    id(motion_last_ms) = millis();
+                    id(desk_cover).publish_state();
+                  }
                   id(disp_height) = h;
                   id(desk_height).publish_state(h);
                 }
@@ -504,10 +704,31 @@ sensor:
                 return position;
 
 text_sensor:
+  # Keypad Command: the last key/combo the keypad (or an ESP-injected command) sent,
+  # as a readable label (e.g. "Preset 1 (0x04)", "Preset 1+2 (0x0C)"), resetting to
+  # "none" on the idle heartbeat. Read-only tap on the forwarder passthrough. Use as an
+  # HA automation trigger: trigger on state change to the label you want. Fires for
+  # functional keys AND the desk-ignored free combos (1+2 / 2+3 / 1+3).
+  - platform: template
+    name: "Keypad Command"
+    id: keypad_cmd_sensor
+    icon: mdi:gesture-tap-button
+    entity_category: "diagnostic"
+    disabled_by_default: true
+  # TEMP passive status-frame capture: raw hex of any inbound control-box frame
+  # whose type byte != 0x12 (the undecoded 0x11/0x13/0x15 status frames).
+  # Read-only; remove after protocol discovery is done.
+  - platform: template
+    name: "Status Frame"
+    id: status_frame_sensor
+    icon: mdi:code-brackets
+    entity_category: "diagnostic"
+    disabled_by_default: true
   # Temporary crash diagnostics: reset reason on every boot (WDT / exception / etc).
   - platform: debug
     reset_reason:
       name: "Reset Reason"
+      disabled_by_default: true
   # Live mirror of the desk's 7-segment display: height (76.6), alarm menu (" 10"),
   # "0FF", "S-" (Set), etc. Decoded from the 9B 07 12 frames by the desk-RX parser.
   - platform: template
@@ -688,6 +909,24 @@ switch:
       - script.execute: set_alarm
     turn_off_action:
       - script.execute: alarm_off
+
+  # ── Desk Lock ────────────────────────────────────────────────────────────────
+  # ON  -> forwarder drops every frame to the desk (keypad + ESP commands blocked).
+  # OFF -> normal passthrough. Also toggled by holding Preset 1+2+3 (0x1C) for 2s at
+  # the keypad. optimistic so the HA-displayed state tracks the command immediately (the
+  # turn_on/off actions set the authoritative desk_locked global; the keypad gesture
+  # publish_state()s this switch to stay in sync). restore_mode RESTORE_DEFAULT_OFF pairs
+  # with the restore_value desk_locked global; on_boot re-syncs the switch to it.
+  - platform: template
+    name: "Desk Lock"
+    id: switch_desk_lock
+    icon: mdi:lock
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    turn_on_action:
+      - lambda: 'id(desk_locked) = true;'
+    turn_off_action:
+      - lambda: 'id(desk_locked) = false;'
 
   - platform: gpio
     name: "Virtual screen" # PIN20 wake line

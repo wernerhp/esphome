@@ -40,12 +40,14 @@ Control interface:
 | Entity | Notes |
 |--------|-------|
 | `sensor` **Height** | Desk height in cm. Keeps the last value across reboots and republishes it on boot. |
-| `cover` Desk | Up/down/position control (internal, driven by the height sensor). |
+| `cover` Desk | Up/down/position control (internal, driven by the height sensor). Reports live motion: **Opening** while the desk rises, **Closing** while it lowers, **idle** when stopped — regardless of whether the move came from the keypad, a preset, or HA. |
+| `switch` **Desk Lock** | Toggle: **On** blocks every keypad/ESP command from reaching the desk (motors won't move) while still forwarding idle heartbeats so the display sleeps normally; **Off** restores normal control. Also toggled at the keypad by holding **Preset 1+2+3 together for ~2 s**. See [Desk Lock](#desk-lock). |
 | `switch` **Alarm** | Toggle: **On** arms the sit/stand reminder to *Alarm Timer* minutes (fires the keypad commands); **Off** turns the alarm off (long `0x40` hold). Also passively **syncs** to the physical keypad: the switch tracks the On/Off shown on the desk display (any live alarm menu => On, `0FF` => Off), state only, no commands fired. |
 | `number` **Alarm Timer** | Target countdown in minutes (1..99, unit `min`), persisted. A manual keypad edit is written here once, when Edit mode ends (you press A or it times out), so HA history records only saved values. |
 | `button` **Memory** | Program a memory preset (`0x20`). |
 | `button` **Wake** | Wake the display (PIN20). Note: the serial `00 00` heartbeat does **not** wake a sleeping panel; a real key event is required. See PROTOCOL.md. |
 | `text_sensor` Display | Live mirror of the 7-segment display (height, menu, `0FF`, `ASr`, etc.). Diagnostic-class, hidden by default. |
+| `text_sensor` Keypad Command | Readable label of the current keypress/combo (`Preset 1 (0x04)`, `Preset 1+2 (0x0C)`, `none`, etc.), debounced ~60 ms and reset to `none` between presses so it works as a clean automation trigger — including the desk-ignored free combos (1+2 / 2+3 / 1+3). Diagnostic-class, hidden by default; enable it in HA to build keypad automations. See [Keypad automations](#keypad-automations). |
 
 ## Alarm safety (summary)
 
@@ -55,6 +57,71 @@ times out mid-sequence, a stray Up/Down would drive the motor. This config
 guards every alarm-adjust tap with three interlocks (edit-mode confirmed, fresh
 menu frame within 450 ms, desk height unchanged). Full detail and the
 step-direction logic are in [PROTOCOL.md](PROTOCOL.md#alarm-safety).
+
+## Desk Lock
+
+`switch.desk_lock` (or holding **Preset 1 + 2 + 3** together at the keypad for
+~2 s) puts the desk into a locked state. While locked:
+
+- Every **command** frame from the keypad or the ESP (up, down, presets, memory,
+  alarm) is dropped before it reaches the desk control box, so the motors won't
+  move no matter what is pressed.
+- Any command injected from HA (e.g. a held cover Up/Down) is **continuously
+  cleared**, so a queued move can't survive the lock and fire the instant you
+  unlock.
+- Idle `00 00` heartbeats are still forwarded, so the desk's own display-off
+  timer keeps running and the panel sleeps normally.
+
+The keypad gesture and the HA switch stay in sync (either one reflects the
+other), and the lock state is restored across reboots.
+
+> **Note — no "LOCKED" on the panel.** The display can't show a lock indicator
+> without a hardware change: the desk's TX line is wired straight to the keypad's
+> RX line, so the ESP can't inject text onto the panel unless that link is cut
+> and routed through the ESP (the same MITM approach used on the command line).
+> Not done here; possible future mod.
+
+## Keypad automations
+
+Enable the **Keypad Command** text sensor (hidden by default) to drive Home
+Assistant automations from physical keypresses. It publishes a readable label for
+the current key/combo and returns to `none` between presses, debounced ~60 ms so
+intermediate combos (e.g. `Preset 1+2` on the way to `Preset 1+2+3`) don't
+false-fire. The three **free combos** the desk itself ignores — `Preset 1+2`,
+`Preset 2+3`, `Preset 1+3` — make good dedicated triggers.
+
+Example: announce "standing" when Preset 1 is pressed and "sitting" when Preset 2
+is pressed (e.g. through a media player or notify service):
+
+```yaml
+automation:
+  - alias: "Desk — announce standing"
+    trigger:
+      - platform: state
+        entity_id: sensor.tekdesk_keypad_command
+        to: "Preset 1 (0x04)"
+    action:
+      - service: tts.google_translate_say
+        data:
+          entity_id: media_player.office
+          message: "Standing"
+
+  - alias: "Desk — announce sitting"
+    trigger:
+      - platform: state
+        entity_id: sensor.tekdesk_keypad_command
+        to: "Preset 2 (0x08)"
+    action:
+      - service: tts.google_translate_say
+        data:
+          entity_id: media_player.office
+          message: "Sitting"
+```
+
+Swap the `to:` value for any label in the sensor (`Preset 1+2 (0x0C)`,
+`Memory (0x20)`, `Up (0x01)`, etc.) and the action for whatever you want —
+lights, scenes, presence, logging. The exact `entity_id` of the sensor depends
+on your `device_name` substitution.
 
 ## Flashing
 

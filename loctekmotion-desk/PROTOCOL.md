@@ -58,6 +58,7 @@ Verified live. The bit-OR model holds for every subset of keys:
 | `0C 00` | M1 + M2 | no-op (preset combos ignored) |
 | `14 00` | M1 + M3 | no-op |
 | `18 00` | M2 + M3 | no-op |
+| `1C 00` | M1 + M2 + M3 | no-op (used by this build as the **Desk Lock** toggle gesture — hold ~2 s) |
 | `24 00` | M + M1 | no-op |
 | `28 00` | M + M2 | no-op |
 | `30 00` | M + M3 | no-op |
